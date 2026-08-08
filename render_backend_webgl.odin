@@ -17,6 +17,7 @@ RENDER_BACKEND_WEBGL :: Render_Backend_Interface {
 	set_internal_state = webgl_set_internal_state,
 	create_texture = webgl_create_texture,
 	load_texture = webgl_load_texture,
+	load_texture_compressed = webgl_load_texture_compressed,
 	update_texture = webgl_update_texture,
 	destroy_texture = webgl_destroy_texture,
 	texture_needs_vertical_flip = webgl_texture_needs_vertical_flip,
@@ -395,6 +396,39 @@ webgl_load_texture :: proc(data: []u8, width: int, height: int, format: Pixel_Fo
 		return TEXTURE_NONE
 	}
 
+	return texture_handle
+}
+
+webgl_load_texture_compressed :: proc(
+	data: []u8,
+	width: int,
+	height: int,
+	format: Compressed_Texture_Format,
+) -> Texture_Handle {
+	id := gl.CreateTexture()
+	gl.BindTexture(gl.TEXTURE_2D, id)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, i32(gl.CLAMP_TO_EDGE))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, i32(gl.CLAMP_TO_EDGE))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, i32(gl.NEAREST))
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, i32(gl.NEAREST))
+
+	internal_format: gl.Enum
+	switch format {
+	case .BC3_RGBA:      internal_format = 0x83F3
+	case .BC7_RGBA:      internal_format = 0x8E8C
+	case .ETC2_RGBA:     internal_format = 0x9278
+	case .ASTC_4x4_RGBA: internal_format = 0x93B0
+	}
+	gl.CompressedTexImage2D(
+		gl.TEXTURE_2D, 0, internal_format, i32(width), i32(height), 0, len(data), raw_data(data),
+	)
+
+	texture_handle, err := hm.add(&s.textures, WebGL_Texture{id = id, format = .Unknown})
+	if err != nil {
+		gl.DeleteTexture(id)
+		log.errorf("Failed adding compressed texture to handle map: %v", err)
+		return TEXTURE_NONE
+	}
 	return texture_handle
 }
 

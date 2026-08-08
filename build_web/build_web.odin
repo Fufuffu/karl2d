@@ -55,6 +55,9 @@ main :: proc() {
 	WEB_ENTRY_INDEX :: #load("web_entry_templates/index_template.html")
 	AUDIO_JS :: #load("../audio_backend_web_audio.js")
 	AUDIO_PROCESSOR_JS :: #load("../audio_backend_web_audio_processor.js")
+	KTX2_BACKEND_JS :: #load("../ktx2_backend_web.js")
+	LIBKTX_READ_JS :: #load("../third_party/ktx2/web/libktx_read.js")
+	LIBKTX_READ_WASM :: #load("../third_party/ktx2/web/libktx_read.wasm")
 
 	dir_handle, dir_handle_err := os.open(dir)
 	fmt.ensuref(dir_handle_err == nil, "Failed finding directory %v. Error: %v", dir, dir_handle_err)
@@ -105,6 +108,13 @@ main :: proc() {
 
 	write_audio_js_processor_err := os.write_entire_file(path_join({bin_web_dir, "audio_backend_web_audio_processor.js"}), AUDIO_PROCESSOR_JS)
 	fmt.ensuref(write_audio_js_processor_err == nil, "Failed writing %v. Error: %v", entry_odin_file_path, write_audio_js_processor_err)
+
+	write_ktx2_js_err := os.write_entire_file(path_join({bin_web_dir, "ktx2_backend_web.js"}), KTX2_BACKEND_JS)
+	fmt.ensuref(write_ktx2_js_err == nil, "Failed writing KTX2 web backend. Error: %v", write_ktx2_js_err)
+	write_libktx_js_err := os.write_entire_file(path_join({bin_web_dir, "libktx_read.js"}), LIBKTX_READ_JS)
+	fmt.ensuref(write_libktx_js_err == nil, "Failed writing libktx_read.js. Error: %v", write_libktx_js_err)
+	write_libktx_wasm_err := os.write_entire_file(path_join({bin_web_dir, "libktx_read.wasm"}), LIBKTX_READ_WASM)
+	fmt.ensuref(write_libktx_wasm_err == nil, "Failed writing libktx_read.wasm. Error: %v", write_libktx_wasm_err)
 
 	wasm_out_path := path_join({bin_web_dir, "main.wasm"})
 

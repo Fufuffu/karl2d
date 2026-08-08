@@ -18,6 +18,7 @@ RENDER_BACKEND_D3D11 :: Render_Backend_Interface {
 	set_internal_state = d3d11_set_internal_state,
 	create_texture = d3d11_create_texture,
 	load_texture = d3d11_load_texture,
+	load_texture_compressed = d3d11_load_texture_compressed,
 	update_texture = d3d11_update_texture,
 	destroy_texture = d3d11_destroy_texture,
 	texture_needs_vertical_flip = d3d11_texture_needs_vertical_flip,
@@ -581,10 +582,65 @@ d3d11_load_texture :: proc(data: []u8, width: int, height: int, format: Pixel_Fo
 	return create_texture(width, height, format, raw_data(data))
 }
 
+d3d11_load_texture_compressed :: proc(
+	data: []u8,
+	width: int,
+	height: int,
+	format: Compressed_Texture_Format,
+) -> Texture_Handle {
+	dxgi_format: dxgi.FORMAT
+	#partial switch format {
+	case .BC3_RGBA: dxgi_format = .BC3_UNORM
+	case .BC7_RGBA: dxgi_format = .BC7_UNORM
+	case:
+		log.errorf("Compressed texture format %v is unsupported by the D3D11 backend", format)
+		return TEXTURE_NONE
+	}
+
+	desc := d3d11.TEXTURE2D_DESC{
+		Width = u32(width),
+		Height = u32(height),
+		MipLevels = 1,
+		ArraySize = 1,
+		Format = dxgi_format,
+		SampleDesc = {Count = 1},
+		Usage = .DEFAULT,
+		BindFlags = {.SHADER_RESOURCE},
+	}
+	initial_data := d3d11.SUBRESOURCE_DATA{
+		pSysMem = raw_data(data),
+		SysMemPitch = u32(((width + 3) / 4) * 16),
+		SysMemSlicePitch = u32(len(data)),
+	}
+	texture: ^d3d11.ITexture2D
+	if ch(s.device->CreateTexture2D(&desc, &initial_data, &texture)) < 0 {
+		return TEXTURE_NONE
+	}
+	view: ^d3d11.IShaderResourceView
+	if ch(s.device->CreateShaderResourceView(texture, nil, &view)) < 0 {
+		texture->Release()
+		return TEXTURE_NONE
+	}
+
+	texture_handle, err := hm.add(&s.textures, D3D11_Texture{
+		tex = texture,
+		view = view,
+		format = .Unknown,
+		sampler = create_sampler(.MIN_MAG_MIP_POINT),
+	})
+	if err != nil {
+		view->Release()
+		texture->Release()
+		log.errorf("Failed to add compressed texture. Error: %v", err)
+		return TEXTURE_NONE
+	}
+	return texture_handle
+}
+
 d3d11_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect) -> bool {
 	tex := hm.get(&s.textures, th)
 
-	if tex == nil || tex.tex == nil {
+	if tex == nil || tex.tex == nil || tex.format == .Unknown {
 		log.errorf("Trying to update texture %v with new data, but it is invalid.", th)
 		return false
 	}

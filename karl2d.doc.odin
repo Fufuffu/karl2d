@@ -427,16 +427,22 @@ draw_text :: proc(
 create_texture :: proc(width: int, height: int, format: Pixel_Format) -> Texture
 
 // Load a texture from disk and upload it to the GPU so you can draw it to the screen.
-// Supports PNG, BMP, TGA and baseline PNG. Note that progressive PNG files are not supported!
+// Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
+// block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_file :: proc(filename: string, options: Load_Texture_Options = {}) -> Texture
 
 // Load a texture from a byte slice and upload it to the GPU so you can draw it to the screen.
-// Supports PNG, BMP, TGA and baseline PNG. Note that progressive PNG files are not supported!
+// Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
+// block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture
+
+// Load a UASTC KTX2 image and upload it without decoding through an intermediate PNG/RGBA image.
+// Karl2D selects a GPU-native compressed format supported by the active render backend.
+load_texture_from_ktx2 :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture
 
 // Load raw texture data. You need to specify the data, size and format of the texture yourself.
 // This assumes that there is no header in the data. If your data has a header (you read the data

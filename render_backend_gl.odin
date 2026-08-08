@@ -17,6 +17,7 @@ RENDER_BACKEND_GL :: Render_Backend_Interface {
 	set_internal_state = gl_set_internal_state,
 	create_texture = gl_create_texture,
 	load_texture = gl_load_texture,
+	load_texture_compressed = gl_load_texture_compressed,
 	update_texture = gl_update_texture,
 	destroy_texture = gl_destroy_texture,
 	texture_needs_vertical_flip = gl_texture_needs_vertical_flip,
@@ -423,6 +424,40 @@ gl_load_texture :: proc(data: []u8, width: int, height: int, format: Pixel_Forma
 		return {}
 	}
 
+	return tex
+}
+
+gl_load_texture_compressed :: proc(
+	data: []u8,
+	width: int,
+	height: int,
+	format: Compressed_Texture_Format,
+) -> Texture_Handle {
+	id: u32
+	gl.GenTextures(1, &id)
+	gl.BindTexture(gl.TEXTURE_2D, id)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+
+	internal_format: u32
+	switch format {
+	case .BC3_RGBA:      internal_format = 0x83F3
+	case .BC7_RGBA:      internal_format = 0x8E8C
+	case .ETC2_RGBA:     internal_format = 0x9278
+	case .ASTC_4x4_RGBA: internal_format = 0x93B0
+	}
+	gl.CompressedTexImage2D(
+		gl.TEXTURE_2D, 0, internal_format, i32(width), i32(height), 0, i32(len(data)), raw_data(data),
+	)
+
+	tex, err := hm.add(&s.textures, GL_Texture{id = id, format = .Unknown})
+	if err != nil {
+		gl.DeleteTextures(1, &id)
+		log.errorf("Failed to load compressed texture. Error: %v", err)
+		return {}
+	}
 	return tex
 }
 

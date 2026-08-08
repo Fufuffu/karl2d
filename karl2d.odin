@@ -1541,7 +1541,8 @@ create_texture :: proc(width: int, height: int, format: Pixel_Format) -> Texture
 }
 
 // Load a texture from disk and upload it to the GPU so you can draw it to the screen.
-// Supports PNG, BMP, TGA and baseline PNG. Note that progressive PNG files are not supported!
+// Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
+// block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_file :: proc(filename: string, options: Load_Texture_Options = {}) -> Texture {
@@ -1552,29 +1553,18 @@ load_texture_from_file :: proc(filename: string, options: Load_Texture_Options =
 		return {}
 	}
 
-	load_options := image.Options {
-		.alpha_add_if_missing,
-	}
-
-	if .Premultiply_Alpha in options {
-		load_options += { .alpha_premultiply }
-	}
-
-	img, img_err := image.load_from_bytes(data, options = load_options, allocator = s.frame_allocator)
-
-	if img_err != nil {
-		log.errorf("Error loading texture '%v': %v", filename, img_err)
-		return {}
-	}
-
-	return load_texture_from_bytes_raw(img.pixels.buf[:], img.width, img.height, .RGBA_8_Norm)
+	return load_texture_from_bytes(data, options)
 }
 
 // Load a texture from a byte slice and upload it to the GPU so you can draw it to the screen.
-// Supports PNG, BMP, TGA and baseline PNG. Note that progressive PNG files are not supported!
+// Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
+// block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture {
+	if ktx2_is_data(bytes) {
+		return load_texture_from_ktx2(bytes, options)
+	}
 	load_options := image.Options {
 		.alpha_add_if_missing,
 	}
@@ -1591,6 +1581,12 @@ load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {})
 	}
 
 	return load_texture_from_bytes_raw(img.pixels.buf[:], img.width, img.height, .RGBA_8_Norm)
+}
+
+// Load a UASTC KTX2 image and upload it without decoding through an intermediate PNG/RGBA image.
+// Karl2D selects a GPU-native compressed format supported by the active render backend.
+load_texture_from_ktx2 :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture {
+	return ktx2_load_texture(bytes, options)
 }
 
 // Load raw texture data. You need to specify the data, size and format of the texture yourself.
@@ -5292,4 +5288,17 @@ color_from_f32_color :: proc(color: Color_F32) -> Color {
 		u8(color.b * 255),
 		u8(color.a * 255),
 	}
+}
+
+load_texture_from_bytes_compressed :: proc(
+	bytes: []u8,
+	width: int,
+	height: int,
+	format: Compressed_Texture_Format,
+) -> Texture {
+	backend_tex := rb.load_texture_compressed(bytes, width, height, format)
+	if backend_tex == TEXTURE_NONE {
+		return {}
+	}
+	return {handle = backend_tex, width = width, height = height}
 }

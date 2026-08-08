@@ -46,6 +46,12 @@ Render_Backend_Interface :: struct #all_or_none {
 
 	create_texture: proc(width: int, height: int, format: Pixel_Format) -> Texture_Handle,
 	load_texture: proc(data: []u8, width: int, height: int, format: Pixel_Format) -> Texture_Handle,
+	load_texture_compressed: proc(
+		data: []u8,
+		width: int,
+		height: int,
+		format: Compressed_Texture_Format,
+	) -> Texture_Handle,
 	update_texture: proc(handle: Texture_Handle, data: []u8, rect: Rect) -> bool,
 	destroy_texture: proc(handle: Texture_Handle),
 	texture_needs_vertical_flip: proc(handle: Texture_Handle) -> bool,
@@ -78,4 +84,11 @@ Render_Backend_Interface :: struct #all_or_none {
 
 	default_shader_vertex_source: proc() -> []byte,
 	default_shader_fragment_source: proc() -> []byte,
+}
+
+Compressed_Texture_Format :: enum {
+	BC3_RGBA,
+	BC7_RGBA,
+	ETC2_RGBA,
+	ASTC_4x4_RGBA,
 }
