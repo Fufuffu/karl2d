@@ -1801,7 +1801,7 @@ load_texture_from_file :: proc(filename: string, options: Load_Texture_Options =
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture {
 	if ktx2_is_data(bytes) {
-		return load_texture_from_ktx2(bytes, options)
+		return ktx2_load_texture(bytes, options)
 	}
 	load_options := image.Options {
 		.alpha_add_if_missing,
@@ -1819,12 +1819,6 @@ load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {})
 	}
 
 	return load_texture_from_bytes_raw(img.pixels.buf[:], img.width, img.height, .RGBA_8_Norm)
-}
-
-// Load a UASTC KTX2 image and upload it without decoding through an intermediate PNG/RGBA image.
-// Karl2D selects a GPU-native compressed format supported by the active render backend.
-load_texture_from_ktx2 :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture {
-	return ktx2_load_texture(bytes, options)
 }
 
 // Load raw texture data. You need to specify the data, size and format of the texture yourself.

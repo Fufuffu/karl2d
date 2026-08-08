@@ -332,6 +332,7 @@ draw_rect_outline :: proc(r: Rect, thickness: f32, color: Color)
 
 // Draw rectangle with rounded edges
 // Segments represents how many triangles the corners will have multiplied by 2
+// Based on: https://github.com/karl-zylinski/karl2d/pull/42, fixed winding orders
 draw_rect_rounded :: proc(rec: Rect, roundness: f32, c: Color, origin: Vec2 = 0, rot: f32 = 0, segments: int = 3)
 
 // Draw a circle with a certain center and radius. Note the `segments` parameter: This circle is not
@@ -443,10 +444,6 @@ load_texture_from_file :: proc(filename: string, options: Load_Texture_Options =
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
 load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture
-
-// Load a UASTC KTX2 image and upload it without decoding through an intermediate PNG/RGBA image.
-// Karl2D selects a GPU-native compressed format supported by the active render backend.
-load_texture_from_ktx2 :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture
 
 // Load raw texture data. You need to specify the data, size and format of the texture yourself.
 // This assumes that there is no header in the data. If your data has a header (you read the data
