@@ -13,6 +13,10 @@
 		<script type="text/javascript" src="ktx2_backend_web.js"></script>
 		<script type="text/javascript" src="odin.js"></script>
 		<script type="text/javascript">
+			if (window.parent !== window) {
+				// This prevents keyboard commands from triggering outside of the iframe.
+				document.getElementById('body').addEventListener('keydown', (ev) => ev.preventDefault());
+			}
 			async function run() {
 				await initializeKarl2dKtx2(document.getElementById("webgl-canvas"));
 				const wasmMemoryInterface = new odin.WasmMemoryInterface();
