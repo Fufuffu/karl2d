@@ -904,17 +904,9 @@ draw_rect_rounded::proc(rec: Rect, roundness: f32, c: Color, origin: Vec2 = 0, r
 		draw_rect(rec, c, origin, rot)
 		return
 	}
-	// (6 * segments * 4) 6 is the number of verts in a segment. 4 is the number of corners
-	// (6*5) 6 is the number of verts in a quad. 5 is the number of quads
-	vert_count:=(6 * segments * 4)+(6*5)
-	if s.vertex_buffer_cpu_used + s.batch_shader.vertex_size * vert_count > len(s.vertex_buffer_cpu) {
-		draw_current_batch()
-	}
-	if s.batch_texture != s.shape_drawing_texture {
-		draw_current_batch()
-	}
-	s.batch_texture = s.shape_drawing_texture
-	
+	// Each corner has segments/2 quads, followed by five body quads.
+	vert_count := 6 * (segments / 2) * 4 + 6 * 5
+	_begin_vertices(s.shape_drawing_texture, vert_count)
 	
 	if roundness >= 1 {// clamps the roundness value to 1
 		roundness = 1
@@ -924,7 +916,7 @@ draw_rect_rounded::proc(rec: Rect, roundness: f32, c: Color, origin: Vec2 = 0, r
 	radius:f32
 	if rec.w > rec.h {
 		radius = (rec.h * roundness) / 2
-	}else{
+	} else {
 		radius = (rec.w * roundness) / 2
 	}
 
