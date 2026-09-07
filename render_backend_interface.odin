@@ -86,19 +86,27 @@ Render_Backend_Interface :: struct #all_or_none {
 
 	set_internal_state: proc(state: rawptr),
 
-	create_texture: proc(width: int, height: int, format: Pixel_Format) -> Texture_Handle,
-	load_texture: proc(data: []u8, width: int, height: int, format: Pixel_Format) -> Texture_Handle,
+	create_texture: proc(width: int, height: int, format: Pixel_Format) -> (Texture_Handle, bool),
+	load_texture: proc(
+		data: []u8,
+		width: int,
+		height: int,
+		format: Pixel_Format,
+	) -> (Texture_Handle, bool),
 	load_texture_compressed: proc(
 		data: []u8,
 		width: int,
 		height: int,
 		format: Compressed_Texture_Format,
-	) -> Texture_Handle,
+	) -> (Texture_Handle, bool),
 	update_texture: proc(handle: Texture_Handle, data: []u8, rect: Rect) -> bool,
 	destroy_texture: proc(handle: Texture_Handle),
 	texture_needs_vertical_flip: proc(handle: Texture_Handle) -> bool,
 
-	create_render_texture: proc(width: int, height: int) -> (Texture_Handle, Render_Target_Handle),
+	create_render_texture: proc(
+		width: int,
+		height: int,
+	) -> (Texture_Handle, Render_Target_Handle, bool),
 	destroy_render_target: proc(render_texture: Render_Target_Handle),
 	
 	set_texture_filter: proc(
@@ -116,6 +124,7 @@ Render_Backend_Interface :: struct #all_or_none {
 	) -> (
 		handle: Shader_Handle,
 		desc: Shader_Desc,
+		ok: bool,
 	),
 
 	destroy_shader: proc(shader: Shader_Handle),
@@ -126,6 +135,11 @@ Render_Backend_Interface :: struct #all_or_none {
 
 	default_shader_vertex_source: proc() -> []byte,
 	default_shader_fragment_source: proc() -> []byte,
+
+	// The z range the backend's clip space uses, so the projection matrix can map the user's
+	// `depth_range_min`/`depth_range_max` onto it. Called before `init`, so this must return a
+	// constant and not touch any backend state.
+	get_depth_clip_range: proc() -> (min: f32, max: f32),
 }
 
 Compressed_Texture_Format :: enum {

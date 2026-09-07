@@ -1,11 +1,30 @@
 # LLM agent instructions for Karl2D
 
-Conventions for writing code, writing documentation, and collaborating on this project.
+## Checklist
 
-> Human can read this file too, but it might not be optimized for human consumption. Also, note that no form of vibe coded changes are allowed. You can use an LLM to do code reviews and generate code, but you _must_ understand the code generated.
+Read this before starting and go through it again before saying the work is done. It is a summary of the sections further down, which are what each line means in full, and it is the only copy of the summary: the hooks in `.claude/hooks/` pull this section straight out of this file when they run. A line here that disagrees with its section is a bug in this file.
+
+- Write procedural, imperative code. A long procedure beats splitting the work across small ones.
+- No comment says how the code used to work or what a change improved. The reader has only ever seen the current version.
+- Try to keep the diff small: Don't move and reorder whole procedures for no good reason.
+- No unrelated code touched, no auto-formatter output, no whitespace changed on lines not otherwise being changed.
+- If you need to do breaking changes, then add `@(deprecated)` on old version, if possible.
+- Cleanup is written where it happens. `defer` only where several exits would each repeat it.
+- A pointer parameter tells the reader the procedure writes through it. Values are automatically passed by reference if big enough, don't pass by pointer to optimize!
+- Handles use the zero value `<TYPE>_NONE`, never `Maybe`. Code that runs every frame guards with `!= <TYPE>_NONE`.
+- Named return values either drive naked returns, in which case they start with `_`, or say what a returned value is. Never assigned to either way.
+- Multi-return results are named `thing_err` and `thing_ok`, never `err_thing`.
+- Boxed section comments appear only in `karl2d.odin`.
+- Tabs for indentation. At most 100 characters per line in `.odin` files. Markdown files should not have hard linebreaks, we'll use wrapping in editor for those.
+- No single line `if` bodies. No spaces in `0..<n` or around the `=` in an attribute.
+- Anything that does not fit on one line is split one item per line, each ending with a comma, closing bracket on its own line. Return value lists split the same way.
+- Ran the relevant build task(s), and `odin run tools/test_examples` if the change was large.
+- If the API surface changed: regenerate `karl2d.doc.odin` with `tools/api_doc_builder`.
+- The commit message reads like a tweet: 180 characters at most, simple sentences, the period is the only punctuation.
+- The pull request description contains only the things listed under Pull request descriptions, ending with a "Testing and reviewing" checklist that lists only the platforms the change actually touches.
 
 ## Project Overview
-- **Karl2D** is a 2D game development library written in the Odin programming language, licensed under Zlib license.
+- **Karl2D** is a 2D game development library written in the Odin programming language.
 - The focus is on being beginner-friendly, using a minimal set of dependencies and minimizing issues when you actually want to ship the game.
 - Karl2D usually requires the latest release of Odin.
 - The main entry point is `karl2d.odin`, which contains the platform-independent API and core logic. Platform, render and audio backends live in separate files.
@@ -23,10 +42,51 @@ Conventions for writing code, writing documentation, and collaborating on this p
 
 Write them like a tweet, max 180 characters. Only simple sentences. Only allowed punctuation is the period. If possible, keep them to 3-4 words. Use more words if really needed.
 
+## Pull request descriptions
+
+Keep them short. They contain only these things, in this order:
+
+- A short description of what was done. A few sentences at most.
+- The things that changed in the API. Say so explicitly if nothing did.
+- Bullet points of the changes that are not in the API.
+- The line "Created with the help of Claude Code".
+- A "Testing and reviewing" checklist of empty checkboxes, at the bottom.
+
+Nothing else. No narrative of how the work was done, no verification logs, no rationale that belongs in the issue.
+
+### The testing and reviewing checklist
+
+Every pull request ends with a list of unticked checkboxes, so the review and the testing can be signed off one item at a time. The boxes belong to the humans who review and test the change. Never tick one, not even for a platform you built and ran yourself, and never tick one later either. The full form looks like this:
+
+```
+## Testing and reviewing
+- [ ] Platform agnostic code reviewed
+
+Platform specific code reviewed
+- [ ] Windows
+- [ ] Mac
+- [ ] Web
+- [ ] Linux Wayland
+- [ ] Linux X11
+
+Tested on:
+- [ ] Windows
+- [ ] Mac
+- [ ] Web
+- [ ] Linux Wayland
+- [ ] Linux Wayland GNOME
+- [ ] Linux X11
+```
+
+Cut it down to what the change actually touches. A list full of lines nobody needs to look at makes the ones that matter easy to miss.
+
+- Keep "Platform agnostic code reviewed" only if the change touched code outside the platform backends.
+- Under "Platform specific code reviewed", list only the platforms whose code the change touched. Drop the whole block when it touched none of them. A change that only edits Wayland files lists Wayland alone.
+- Under "Tested on", list the platforms the change can affect. Platform agnostic changes affect all of them. A Wayland-only change lists the two Wayland lines, and an X11-only change lists the X11 line. Wayland has two lines because GNOME's compositor behaves differently from the others, so it gets tested separately.
+
 ## Verifying Your Work
 - Build and test through the examples in `examples/`. Prefer the existing VS Code build tasks; they already include `-vet -strict-style -vet-tabs` and come in three variants: default (D3D11 on Windows), `(GL)`, and `(web)`. Use the same `-vet -strict-style -vet-tabs` flags when running `odin` directly.
 - After edits, run the most relevant build task(s) for what you touched. After a large change, run `odin run tools/test_examples`, the CI script that builds every example (some are excluded from web builds, e.g. `minimal_hello_world`, `custom_frame_update`).
-- `tests/coordinate_system` holds the coordinate system checks. Run it both ways: once plain and once with `-define:KARL2D_TEST_Y_UP=true`, both with `-define:KARL2D_RENDER_BACKEND=nil -define:KARL2D_AUDIO_BACKEND=nil -define:ODIN_TEST_THREADS=1`. They open a window, so they only run where one can be created.
 - Regenerate `karl2d.doc.odin`: `odin run tools/api_doc_builder`. Any change in `karl2d.doc.odin` is a user-facing API change. Make sure you want that change to actually happen. Think about what happens if you break backwards compatibility.
 - Web builds use the script in `build_web/`. Forward game/compiler flags after `--`: `odin run build_web -- your_game_path -debug`. A web game must have `init` and `step` procedures; `examples/minimal_hello_world_web/` is the template.
 - `tools/make_sublime_projects`, `tools/make_vscode_project/` and `tools/make_zed_project/` generate editor project configurations.
@@ -48,6 +108,19 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
   	_camera_flip_y(),
   )
   ```
+- The return values get split over several lines too, not just the parameters. When a signature does not fit, `-> (` opens the list, each return value sits on its own line ending with a comma, and `)` closes it with any tag and the opening brace after it. Splitting both lists reads better than keeping the return values packed on the closing line. This is only about where the line breaks go: it says nothing about naming the return values, which is a separate decision covered further down. See `create_texture` in `render_backend_d3d11.odin`.
+
+  ```
+  create_texture :: proc(
+  	width: int,
+  	height: int,
+  	format: Pixel_Format,
+  	data: rawptr,
+  ) -> (
+  	Texture_Handle,
+  	bool,
+  ) {
+  ```
 - Place `:` and `=` with consistent spacing as in `karl2d.odin`. Opening braces `{` go on the same line as the declaration.
 - Ranges are written without spaces: `for i in 0..<len(pixels)`, not `0 ..< len(pixels)`. Attributes too: `@(private="package")`, not `@(private = "package")`.
 - No single-line `if` bodies: the body goes on its own line, even when it is one statement. (One older example does this; don't copy it.)
@@ -55,7 +128,6 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
 
 ### Naming
 - Multi-return result names use suffixes: `img, img_err := ...` and `data, data_ok := ...`. Always `thing_err`/`thing_ok`, never `err_thing`.
-- A number that appears in more than one place gets a file-level constant, with a unit comment when the unit isn't obvious: `CAMERA_KEY_MOVE_SPEED :: 300 // in screen pixels/sec`.
 - Procs that implement the platform interface carry the platform prefix (`mac_set_cursor`). Internal helpers may skip the prefix when the file is `#+private file` (`apply_cursor_state`).
 - Log messages follow "Failed <doing> <thing>. Error: %v" or "Cannot <verb>, <thing> does not exist.". In platform backends it is also fine to name the failing OS call: "CreateIconIndirect failed with %v".
 
@@ -72,6 +144,7 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
   // INPUT //
   //-------//
   ```
+- Those boxed section comments belong to `karl2d.odin` only. They organize the public API documentation. Do not use them in any other file, no matter how long it gets: platform backends, bindings and examples group their declarations without them.
 - Long procedures can be split up with short ALL-CAPS section comments: `// CAMERA PANNING`, `// DRAW WORLD` (see `examples/camera/camera.odin`).
 
 ### Handles use a zero value, not `Maybe`
@@ -80,6 +153,16 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
 - It keeps handles assignable and comparable as-is. A `Custom_Cursor` goes straight into a `Cursor` union, so `selected = gauntlet` and `selected == gauntlet` just work. Wrapped in a `Maybe` both sides need unwrapping first, and the comparison needs an explicit `Cursor(...)` conversion. There is nothing to unwrap, so no `x, ok := h.?` before every use, and no temporary to carry the unwrapped value around.
 - Passing a zero handle is safe: procedures that take handles log and carry on rather than misbehaving. They log on every call though, so guard with `!= <TYPE>_NONE` in code that runs each frame.
 - See `examples/cursors/cursors.odin` for how this reads in practice.
+
+### Named return values are for naked returns, or for saying what a value is
+- A long procedure that can fail in many places ends up repeating `return SOMETHING_NONE, false` a dozen times. Naming the return values turns each of those into a naked `return`, which is shorter and keeps the failure value in one place. `load_audio_clip_from_bytes`, `load_audio_stream_from_file` and `load_static_font_from_bytes` do this.
+- Whether a procedure is long enough to want this is a judgement call, done by feel. Short procedures, and ones with only a couple of failure paths, keep writing the values out: `create_custom_cursor` still returns `CUSTOM_CURSOR_NONE, false`. Do not convert a procedure just to match a neighbour, and do not convert every procedure in a file at once.
+- Name them with a leading underscore: `_clip`, `_stream`, `_font`, `_ok`.
+- The only two things such a procedure does with them is a naked `return` on every failure path and one real `return value, true` at the end. Never assign to `_clip` or `_ok` themselves.
+- That is what the underscore is for. Assigning to a named return part way through is how they turn into bugs: a later naked `return` then hands back whatever was assigned instead of the zero value, and the reader has to track every assignment to know what actually comes out. A name that starts with `_` does not read like a variable you were meant to write to, so it doesn't happen by accident.
+- This works because every `<TYPE>_NONE` is the zero value of its type, so a naked `return` gives back exactly what the explicit `return SOMETHING_NONE, false` did.
+- The other reason to name them has nothing to do with naked returns: a procedure whose return values are not obvious from their types can name them to say what they are. `wldeco_canvas_size` in `platform_linux_window_wayland_decorations.odin` returns `(canvas_width: int, canvas_height: int)` and takes two ints as well, so without the names the reader cannot tell which way it converts.
+- Names used that way carry no underscore, because there is no naked return for the underscore to protect. The procedure still returns its values explicitly on every path, and still never assigns to the names.
 
 ### Avoid `defer`; write the cleanup where it happens
 - `defer` moves work away from the point it runs, so the reader has to reconstruct the order instead of reading top to bottom. Free, release or destroy a thing on the line after it stops being needed.
@@ -91,8 +174,6 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
 - Odin already passes anything bigger than 16 bytes by implicit reference, so `^T` does not save you a copy. Passing a big struct by value is free.
 - What `^T` does is tell the reader that the procedure may write to what they handed it. Spend that on read-only parameters and a pointer stops meaning anything, so nobody can tell the mutating procedures from the rest at a glance.
 - `_draw_call_changes` compares two draw calls and returns what differs between them, so it takes `Draw_Call`, not `^Draw_Call`, even though they are 128 bytes each. The platform interface's `get_events` fills the array you hand it, so that one takes a pointer.
-- Pointers are also right when the value is optional, or when you need the thing itself rather than its value, which is why `hm.get` hands one back.
-- Don't reach for a pointer because you think it will be faster. If you believe a signature costs something, measure it. The compiler is already doing the thing you are about to do by hand.
 
 ## Architecture Notes
 
@@ -114,9 +195,3 @@ Write them like a tweet, max 180 characters. Only simple sentences. Only allowed
 - No external windowing libraries (like GLFW) are used; all window/event handling is custom.
 - Rendering is batch-based for performance.
 - Web builds use Odin's JS runtime and a custom WebGL backend (no emscripten required).
-
-## Checklist Before You Are Done
-- Ran the relevant build task(s), and `odin run tools/test_examples` if the change was large.
-- If the API surface changed: regenerated `karl2d.doc.odin` and ran `api_verifier` (see Verifying Your Work).
-- No unrelated code touched, no auto-formatter output, no whitespace changes on untouched lines.
-- New code follows the Code Style section, including the comment voice and the handle/defer patterns.

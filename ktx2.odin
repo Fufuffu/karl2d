@@ -51,20 +51,20 @@ Ktx2_Transcode_Result :: struct {
 }
 
 // Load a UASTC KTX2 image, transcode it directly to a GPU-native block format, and upload it.
-ktx2_load_texture :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture {
+ktx2_load_texture :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> (Texture, bool) #optional_ok {
 	if .Premultiply_Alpha in options {
 		log.error("KTX2 textures cannot be premultiplied at load time; encode premultiplied source pixels instead")
-		return {}
+		return {}, false
 	}
 	width, height, dimensions_ok := ktx2_dimensions(bytes)
 	if !dimensions_ok {
 		log.error("Unsupported or invalid KTX2 texture; expected one block-aligned UASTC/Zstd 2D image")
-		return {}
+		return {}, false
 	}
 	result, transcode_ok := ktx2_transcode(bytes, width, height, frame_allocator)
 	if !transcode_ok {
 		log.error("Failed transcoding KTX2 texture")
-		return {}
+		return {}, false
 	}
 
 	if result.uncompressed {

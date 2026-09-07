@@ -111,6 +111,9 @@ process_events :: proc()
 // Note: Gamepad axis movement (analogue sticks and analogue triggers) are _not_ events. Those can
 // only be queried using `k2.get_gamepad_axis`.
 //
+// Note: These are the events the platform reported. The touch that `set_touch_events_from_mouse`
+// makes from the mouse is not one of them, it only shows up in `get_touches`.
+//
 // Warning: The returned slice is only valid during the current frame! You can make a clone of it
 // using the `slice.clone` procedure (import `core:slice`).
 get_events :: proc() -> []Event
@@ -163,11 +166,24 @@ get_window_scale :: proc() -> f32
 // Use to change between windowed mode, resizable windowed mode and fullscreen
 set_window_mode :: proc(window_mode: Window_Mode)
 
+// Sets the icon shown in the titlebar and the OS's program switcher bar. By default Karl2D uses an
+// icon that says K2. Load the image using for example `k2.load_image_from_file`.
+//
+// The data of `image` is copied, so you can destroy it after running this.
+//
+// On web this modifies the icon shown on the tab.
+//
+// Returns `true` if the icon was set. The reason is logged when it wasn't.
+set_window_icon :: proc(image: Image) -> bool
+
 // Flushes the current batch. A batch consists of a number of draw calls and a vertex buffer. This
 // procedure sends all that off to the rendering backend for drawing. Normally, you do not need to
 // call this procedure manually. It is done automatically when `present` or `clear` run. It can also
 // happen when you destroy a resource such as a texture or shader that is used in the current
 // batch.
+//
+// Note that `set_z` never starts a new draw call: the z value is stored in each vertex rather than
+// being part of a draw call's settings, so it's fine to call it before every draw.
 //
 // All the draw calls of a batch share a vertex buffer of VERTEX_BUFFER_MAX bytes. The shader
 // dictates how big a vertex is. The maximum number of vertices in a batch is therefore
@@ -203,6 +219,26 @@ key_is_held :: proc(key: Keyboard_Key) -> bool
 // Warning: The returned slice is only valid during the current frame! You can make a clone of it
 // using the `slice.clone` procedure (import `core:slice`).
 get_typed_runes :: proc() -> []rune
+
+// Returns all touches that were active at any point during this frame, including those that ended
+// this frame (those have `went_up` set).
+//
+// Note: Only web reports touches from a real touch screen. On desktop the only touches you get are
+// the ones `set_touch_events_from_mouse` makes from the mouse.
+//
+// Note: The order is not stable. When a touch ends, the last one in the list takes its place, so
+// match touches by `id` between frames rather than by where they sit in the slice.
+//
+// Warning: The returned slice is only valid during the current frame!
+get_touches :: proc() -> []Touch
+
+// Enabled by default. Holding the left mouse button produces a touch (with id `EMULATED_TOUCH_ID`),
+// so code written for touch also works with a mouse. Turn it off if you handle the mouse yourself,
+// otherwise one drag arrives as both.
+//
+// The touch is built from the mouse state, so it never shows up in `get_events`, only in
+// `get_touches`.
+set_touch_events_from_mouse :: proc(enabled: bool)
 
 // Returns which modifiers are held. The possible values are `Control`, `Alt`, `Shift` and `Super`.
 // You can check that an exact set of modifiers are held like so:
@@ -429,45 +465,88 @@ draw_text :: proc(
 //--------------------//
 
 // Create an empty texture.
-create_texture :: proc(width: int, height: int, format: Pixel_Format) -> Texture
+//
+// The second return value is `true` if the texture was created correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Texture` will still be
+// possible to use, but it won't draw anything.
+create_texture :: proc(
+	width: int,
+	height: int,
+	format: Pixel_Format,
+) -> (Texture, bool) #optional_ok
 
 // Load a texture from disk and upload it to the GPU so you can draw it to the screen.
 // Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
 // block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
-load_texture_from_file :: proc(filename: string, options: Load_Texture_Options = {}) -> Texture
+//
+// The second return value is `true` if the texture was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Texture` will still be
+// possible to use, but it won't draw anything.
+load_texture_from_file :: proc(
+	filename: string,
+	options: Load_Texture_Options = {},
+) -> (Texture, bool) #optional_ok
 
 // Load a texture from a byte slice and upload it to the GPU so you can draw it to the screen.
 // Supports KTX2, PNG, JPEG, BMP and TGA. KTX2 payloads are transcoded directly to a GPU-native
 // block format; PNG/JPEG/BMP/TGA payloads are decoded to RGBA pixels first.
 //
 // The `options` parameter can be used to specify things things such as premultiplication of alpha.
-load_texture_from_bytes :: proc(bytes: []u8, options: Load_Texture_Options = {}) -> Texture
+//
+// The second return value is `true` if the texture was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Texture` will still be
+// possible to use, but it won't draw anything.
+load_texture_from_bytes :: proc(
+	bytes: []u8,
+	options: Load_Texture_Options = {},
+) -> (Texture, bool) #optional_ok
 
 // Load raw texture data. You need to specify the data, size and format of the texture yourself.
 // This assumes that there is no header in the data. If your data has a header (you read the data
 // from a file on disk), then please use `load_texture_from_bytes` instead.
-load_texture_from_bytes_raw :: proc(bytes: []u8, width: int, height: int, format: Pixel_Format) -> Texture
+//
+// The second return value is `true` if the texture was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Texture` will still be
+// possible to use, but it won't draw anything.
+load_texture_from_bytes_raw :: proc(
+	bytes: []u8,
+	width: int,
+	height: int,
+	format: Pixel_Format,
+) -> (Texture, bool) #optional_ok
 
 // Create a GPU texture from an image stored in RAM. There are currently no procedures to manipulate
 // the image. However, you can create an `Image` struct manually and fill out the data as needed.
-load_texture_from_image :: proc(image: Image) -> Texture
+//
+// The second return value is `true` if the texture was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Texture` will still be
+// possible to use, but it won't draw anything.
+load_texture_from_image :: proc(image: Image) -> (Texture, bool) #optional_ok
 
 // Load an image from disk into RAM. Supports the same formats as `load_texture_from_file`. The
 // image is always RGBA8 with straight (non-premultiplied) alpha.
 //
 // Use `destroy_image` when you are done with it.
-load_image :: proc(filename: string) -> Image
+//
+// The second return value is `true` if the image was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Image` will be empty: it
+// has no pixels and a width and height of zero.
+load_image_from_file :: proc(filename: string) -> (Image, bool) #optional_ok
 
 // Load an image from a byte slice into RAM, for instance from `#load("my_image.png")`. Supports
 // the same formats as `load_texture_from_bytes`. The image is always RGBA8 with straight
 // (non-premultiplied) alpha.
 //
 // Use `destroy_image` when you are done with it.
-load_image_from_bytes :: proc(bytes: []u8) -> Image
+//
+// The second return value is `true` if the image was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Image` will be empty: it
+// has no pixels and a width and height of zero.
+load_image_from_bytes :: proc(bytes: []u8) -> (Image, bool) #optional_ok
 
-// Destroy an image previously loaded using `load_image` or `load_image_from_bytes`.
+// Destroy an image previously loaded using `load_image_from_file` or `load_image_from_bytes`.
 destroy_image :: proc(img: Image)
 
 // Get a rectangle that spans the whole texture. Coordinates will be (x, y) = (0, 0) and size
@@ -549,6 +628,22 @@ set_sound_pan :: proc(sound: Sound, pan: f32)
 // play twice as fast, which also makes it sound higher pitched.
 set_sound_pitch :: proc(sound: Sound, pitch: f32)
 
+// Move the sound to another spot in its audio. `seconds` is measured from the start of the audio,
+// so 0 moves it back to the beginning. Use `get_sound_length` to find out how far you can go.
+//
+// Moving a sound that plays an audio stream is a bit slower than one that plays a clip, since some
+// audio has to be decoded before it can play. Don't do it every frame while dragging a scrub bar,
+// do it when the player lets go.
+set_sound_time :: proc(sound: Sound, seconds: f32)
+
+// Get how far into its audio the sound currently is, in seconds. A looping sound goes back to 0
+// each time it starts over. Returns 0 if the sound doesn't exist.
+get_sound_time :: proc(sound: Sound) -> f32
+
+// Get the length of the sound's audio, in seconds. Use it together with `get_sound_time` to show
+// how far into a song you are. Returns 0 if the sound doesn't exist or if the length is unknown.
+get_sound_length :: proc(sound: Sound) -> f32
+
 // Make a sound loop when it reaches the end.
 //
 // Technical note: This also works for sounds started using `play_audio_stream`, but then it
@@ -567,7 +662,11 @@ get_num_sounds_playing_clip :: proc(clip: Audio_Clip) -> int
 //
 // Supports mono and stereo WAV files with 8, 16, 24 or 32 bit integer samples, or 32 or 64 bit
 // float samples.
-load_audio_clip_from_file :: proc(filename: string) -> Audio_Clip
+//
+// The second return value is `true` if the audio clip was loaded correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Audio_Clip` will
+// still be possible to use, but it won't play anything.
+load_audio_clip_from_file :: proc(filename: string) -> (Audio_Clip, bool) #optional_ok
 
 // Load a WAV file from some pre-loaded memory (can be loaded using `#load("sound.wav")`). Returns
 // an `Audio_Clip` which can be played using `play_audio_clip`.
@@ -575,18 +674,26 @@ load_audio_clip_from_file :: proc(filename: string) -> Audio_Clip
 // Supports mono and stereo WAV data with 8, 16, 24 or 32 bit integer samples, or 32 or 64 bit
 // float samples. Note that the data should be the entire WAV file, including the header. If your
 // data does not include the header, then please use `load_audio_clip_from_bytes_raw`.
-load_audio_clip_from_bytes :: proc(bytes: []u8) -> Audio_Clip
+//
+// The second return value is `true` if the audio clip was loaded correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Audio_Clip` will
+// still be possible to use, but it won't play anything.
+load_audio_clip_from_bytes :: proc(bytes: []u8) -> (Audio_Clip, bool) #optional_ok
 
 // Load an audio clip from some raw audio data. You need to specify the data, format and sample
 // rate of the sound yourself. This assumes that there is no header in the data. If your data has a
 // header (for example, you read a whole WAV file from disk), then please use
 // `load_audio_clip_from_bytes` instead.
+//
+// The second return value is `true` if the audio clip was loaded correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Audio_Clip` will
+// still be possible to use, but it won't play anything.
 load_audio_clip_from_bytes_raw :: proc(
 	bytes: []u8,
 	format: Raw_Audio_Format,
 	sample_rate: int,
 	channels: Audio_Channels,
-) -> Audio_Clip
+) -> (Audio_Clip, bool) #optional_ok
 
 // Destroy an audio clip previously loaded using `load_audio_clip_from_xxx`. Also stops sounds
 // playing this clip.
@@ -600,7 +707,13 @@ destroy_audio_clip :: proc(clip: Audio_Clip)
 //
 // Audio streams do not stream in data automatically from the disk. You need to call
 // `update_audio_stream` every frame to stream in the new data.
-load_audio_stream_from_file :: proc(filename: string) -> Audio_Stream
+//
+// The second return value is `true` if the audio stream was loaded correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Audio_Stream` will
+// still be possible to use, but it won't play anything.
+load_audio_stream_from_file :: proc(
+	filename: string,
+) -> (Audio_Stream, bool) #optional_ok
 
 // Load an audio stream from a byte slice that is completely in memory. This makes it possible to
 // have an encoded audio file in memory and decode it, a small bit a time.
@@ -625,7 +738,13 @@ load_audio_stream_from_file :: proc(filename: string) -> Audio_Stream
 // disk. For normal sounds there is a `load_audio_clip_from_bytes_raw` procedure where you just send
 // in the samples. There is no such procedure for audio streams since the whole idea is to stream an
 // encoded file into memory without having to decode the whole thing first.
-load_audio_stream_from_bytes :: proc(bytes: []u8) -> Audio_Stream
+//
+// The second return value is `true` if the audio stream was loaded correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Audio_Stream` will
+// still be possible to use, but it won't play anything.
+load_audio_stream_from_bytes :: proc(
+	bytes: []u8,
+) -> (Audio_Stream, bool) #optional_ok
 
 // Destroy an audio stream previously loaded using `load_audio_stream_from_file` or
 // `load_audio_stream_from_bytes`. This cleans up some internal state and closes file handles.
@@ -639,10 +758,14 @@ destroy_audio_stream :: proc(stream: Audio_Stream)
 update_audio_stream :: proc(stream: Audio_Stream)
 
 // Start playing an audio stream. Returns a `Sound`, which you can control using
-// `set_sound_volume`, `stop_sound` etc. The playback continues from wherever the stream last was:
-// It starts over from the beginning only if the stream was just loaded, was stopped using
-// `stop_sound` or has finished playing. A stream can only play one sound at a time: Playing again
-// replaces the previous one.
+// `set_sound_volume`, `stop_sound` etc. The playback starts from wherever the stream last was,
+// which is the beginning if the stream was just loaded, was stopped using `stop_sound` or has
+// finished playing.
+//
+// A stream can only play one sound at a time. If it is already playing, then this hands back the
+// sound that is already playing and ignores the settings you pass in. Use the `set_sound_xxx`
+// procedures to change how it plays. Use `stop_sound` first if you want to start over from the
+// beginning. A paused sound starts playing again.
 //
 // Don't forget to call `update_audio_stream` every frame in order to stream in new data.
 play_audio_stream :: proc(
@@ -706,7 +829,11 @@ update_audio_mixer :: proc()
 
 // Create a texture that you can render into. Meaning that you can draw into it instead of drawing
 // onto the screen. Use `set_render_texture` to enable this Render Texture for drawing.
-create_render_texture :: proc(width: int, height: int) -> Render_Texture
+//
+// The second return value is `true` if the render texture was created correctly. It's optional to
+// handle this error, it will also be logged. In case of failure, the returned `Render_Texture`
+// will still be possible to use, but setting it does nothing, so drawing stays where it was.
+create_render_texture :: proc(width: int, height: int) -> (Render_Texture, bool) #optional_ok
 
 // Destroy a Render_Texture previously created using `create_render_texture`.
 destroy_render_texture :: proc(render_texture: Render_Texture)
@@ -794,24 +921,51 @@ rotate :: proc(v: Vec2, angle_radians: f32) -> Vec2
 //-------//
 
 // Like `load_static_font_from_bytes` but reads a file from disk using a specified name.
-load_static_font_from_file :: proc(filename: string, font_size: f32, codepoints: []rune = {}, options: Font_Options = {}) -> Font
+//
+// The second return value is `true` if the font was loaded correctly. It's optional to handle this
+// error, it will also be logged. In case of failure, the returned `Font` will still be possible to
+// use, but text drawn with it uses the default font.
+load_static_font_from_file :: proc(
+	filename: string,
+	font_size: f32,
+	codepoints: []rune = {},
+	options: Font_Options = {},
+) -> (Font, bool) #optional_ok
 
 // Load the TTF font contained in `data` and bake it into a texture. The characters in the texture
 // will be of of the specified `font_size`. If you do not specify a list of `codepoints`, then this
 // procedure defaults to using all codepoints between 32 to 127 (ASCII).
+//
+// The second return value is `true` if the font was loaded correctly. It's optional to handle this
+// error, it will also be logged. In case of failure, the returned `Font` will still be possible to
+// use, but text drawn with it uses the default font.
 load_static_font_from_bytes :: proc(
 	data: []byte,
 	font_size: f32,
 	codepoints: []rune = {},
 	options: Font_Options = {},
-) -> Font
+) -> (Font, bool) #optional_ok
 
 // Like `load_dynamic_font_from_bytes`, but reads a file from disk using a filename.
-load_dynamic_font_from_file :: proc(filename: string, options: Font_Options = {}) -> Font
+//
+// The second return value is `true` if the font was loaded correctly. It's optional to handle this
+// error, it will also be logged. In case of failure, the returned `Font` will still be possible to
+// use, but text drawn with it uses the default font.
+load_dynamic_font_from_file :: proc(
+	filename: string,
+	options: Font_Options = {},
+) -> (Font, bool) #optional_ok
 
 // Load a TTF font stored in `data` as a dynamic font. This means that an atlas will be dynamically
 // built as you draw characters using this font.
-load_dynamic_font_from_bytes :: proc(data: []u8, options: Font_Options = {}) -> Font
+//
+// The second return value is `true` if the font was loaded correctly. It's optional to handle this
+// error, it will also be logged. In case of failure, the returned `Font` will still be possible to
+// use, but text drawn with it uses the default font.
+load_dynamic_font_from_bytes :: proc(
+	data: []u8,
+	options: Font_Options = {},
+) -> (Font, bool) #optional_ok
 
 // Destroy a font previously loaded using `load_font_from_file` or `load_font_from_bytes`.
 destroy_font :: proc(font: Font)
@@ -829,8 +983,10 @@ set_cursor :: proc(cursor: Cursor)
 //
 // The cursor does not need `image` after it is created. You may destroy it.
 //
-// If the cursor can't be created, then an error is logged and `CUSTOM_CURSOR_NONE` is returned.
-create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cursor
+// The second return value is `true` if the cursor was created correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Custom_Cursor` will still
+// be possible to use, but setting it leaves the cursor as it is.
+create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) #optional_ok
 
 // Destroy a cursor previously created using `create_custom_cursor`. If it is the cursor currently
 // on screen then Karl2D will restore the default OS cursor.
@@ -858,19 +1014,27 @@ is_cursor_hidden :: proc() -> bool
 //
 // `layout_formats` can in many cases be left default initialized. It is used to specify the format
 // of the vertex shader inputs. By formats this means the format that you pass on the CPU side.
+//
+// The second return value is `true` if the shader was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Shader` will still be
+// possible to use, but setting it does nothing: drawing carries on with the shader already set.
 load_shader_from_file :: proc(
 	vertex_filename: string,
 	fragment_filename: string,
 	layout_formats: []Pixel_Format = {}
-) -> Shader
+) -> (Shader, bool) #optional_ok
 
 // Load a vertex and fragment shader from a block of memory. See `load_shader_from_file` for what
 // `layout_formats` means.
+//
+// The second return value is `true` if the shader was loaded correctly. It's optional to handle
+// this error, it will also be logged. In case of failure, the returned `Shader` will still be
+// possible to use, but setting it does nothing: drawing carries on with the shader already set.
 load_shader_from_bytes :: proc(
 	vertex_shader_bytes: []byte,
 	fragment_shader_bytes: []byte,
 	layout_formats: []Pixel_Format = {},
-) -> Shader
+) -> (Shader, bool) #optional_ok
 
 // Destroy a shader previously loaded using `load_shader_from_file` or `load_shader_from_bytes`
 destroy_shader :: proc(shader: Shader)
@@ -947,13 +1111,36 @@ camera_inverse_view_matrix :: proc(c: Camera) -> Mat4
 // MISC //
 //------//
 
-// Choose how the alpha channel is used when mixing half-transparent color with what is already
-// drawn. The default is the .Alpha mode, but you also have the option of using .Premultiply_Alpha.
+// Makes a Karl2D icon with K and the 2 from the logo. It will be `size*size` pixels. It's created
+// from pixel art that is 16x16, scaled up with nearest neighbor. So a size divisible by 16 is
+// recommended.
+//
+// `init` uses this procedure for the default window icon.
+//
+// Use `destroy_image` when you no longer need the image.
+make_karl2d_icon :: proc(size: int) -> Image
+
+// Makes a Karl2D logo that says KARL2D. It will be `width*width/3` pixels. It is created from pixel
+// art that is 30x10 pixels large. So a width that is divisible by 30 is recommended.
+//
+// Use `destroy_image` when you no longer need the image.
+make_karl2d_logo :: proc(width: int) -> Image
+
+// Choose how drawn colors are mixed with what is already drawn. The default is .Alpha.
 set_blend_mode :: proc(mode: Blend_Mode)
 
 // Make everything outside of the screen-space rectangle `scissor_rect` not render. Disable the
 // scissor rectangle by running `set_scissor_rect(nil)`.
 set_scissor_rect :: proc(scissor_rect: Maybe(Rect))
+
+// Set the z used by draws that happen after this call. Only has an effect when `depth_test` was
+// enabled in `Init_Options`. Higher z ends up in front. Unlike `set_blend_mode` and
+// `set_scissor_rect`, this never starts a new draw call: the z is stored in each vertex rather
+// than being part of a draw call's settings, so it's fine to call this before every draw.
+set_z :: proc(z: f32)
+
+// Get the z previously set with `set_z`. Defaults to 0.
+get_z :: proc() -> f32
 
 // Restore the internal state using the pointer returned by `init`. Useful after reloading the
 // library (for example, when doing code hot reload).
@@ -987,14 +1174,14 @@ open_url :: proc(url: string) -> Open_URL_Error
 // The witdth a button drawn using `ui_button` will have
 ui_button_width :: proc(text: string, button_height: f32) -> f32
 
-// Experimental UI button. Returns true if the button was pressed. Currently only works properly
-// when no camera is set.
+// Experimental UI button. Returns true if the button was pressed. `r` is in the space of whatever
+// camera is currently set (see `set_camera`), same as any other drawing call.
 //
-// Mainly used by the samples in order to create the "Source" button.
+// A left click presses it, and so does a tap, so it works on a touch screen with no mouse at all.
 //
-// Note that this does not support zoomed cameras right now, since it uses unscaled mouse positions.
-// As this is experimental, you are probably better off copying this procedure to your own code and
-// modifying it, rather than using it as-is.
+// Mainly used by the samples in order to create the "Source" button. As this is experimental, you
+// are probably better off copying this procedure to your own code and modifying it, rather than
+// using it as-is.
 ui_button :: proc(r: Rect, text: string) -> bool
 
 //---------------------//
@@ -1098,6 +1285,9 @@ Blend_Mode :: enum {
 	// Requires the alpha-channel to be multiplied into texture RGB channels. You can automatically
 	// do this using the `Premultiply_Alpha` option when loading a texture.
 	Premultiplied_Alpha,
+
+	// Adds the source color, multiplied by its alpha, to the color already drawn.
+	Additive,
 }
 
 // A render texture is a texture that you can draw into, instead of drawing to the screen. Create
@@ -1184,7 +1374,20 @@ Init_Options :: struct {
 	// platforms, such as Linux+Wayland, it does not work, because Wayland always auto scales all
 	// windows.
 	disable_auto_scale_hint: bool,
+
+	// Enable depth testing. Draws are then sorted by the z value set with `set_z`: higher z ends up
+	// in front. Things drawn at the same z use the drawing order, like when depth testing is off.
+	depth_test: bool,
+
+	// The range of z values you can use with `set_z`. Leave both at zero to get the default range
+	// of -1 to 1. Set them to something like 0 and 1000 if you'd rather feed `set_z` world
+	// coordinates. Only used when `depth_test` is on.
+	depth_range_min: f32,
+	depth_range_max: f32,
 }
+
+DEPTH_RANGE_DEFAULT_MIN :: -1
+DEPTH_RANGE_DEFAULT_MAX :: 1
 
 Shader_Handle :: distinct Handle
 
@@ -1432,6 +1635,21 @@ Audio_Stream_Data :: struct {
 	// Together with the `offset` of the Sound_Object, this forms a circular buffer.
 	buffer_write_pos: int,
 
+	// How far into the file the samples we most recently wrote into the clip were, counted the
+	// same way as the clip's samples: In the case of stereo, left and right count as one each.
+	// Take away the samples in the clip that haven't played yet and you get the spot the listener
+	// is hearing, which is what `get_sound_time` does.
+	decode_cursor: int,
+
+	// When above zero, `update_audio_stream` throws this many decoded samples away instead of
+	// writing them to the clip. Used when moving the stream, since the decoder can only move in
+	// steps of a whole ogg page.
+	seek_discard: int,
+
+	// How many samples the whole file has, counted the same way as `decode_cursor`. Worked out
+	// when the stream is loaded. Zero if it could not be worked out.
+	total_samples: int,
+
 	// Different from `loop` in `Sound_Object`. This says if the whole stream should loop
 	// when it reaches end-of-file. The `loop` in `Sound_Object` just says to loop the
 	// buffer itself. That's something you always want for a stream: We are continously writing
@@ -1508,6 +1726,16 @@ Sound_Object :: struct {
 	// Set using `set_sound_paused`. The mixer skips paused sounds.
 	paused: bool,
 
+	// `set_sound_time` doesn't move the sound straight away. The mixer fades it out first, then
+	// moves it, then fades it back in, so that landing in a completely different part of the
+	// waveform doesn't click. This is where it is going once the fade out is done.
+	pending_seek_seconds: f32,
+	has_pending_seek: bool,
+
+	// The fade used when moving a sound: 0 is no fade and 1 is completely faded out. The mixer
+	// raises it while a move is pending and lowers it again once the move is done.
+	seek_fade: f32,
+
 	// The bus this is mixed into. The zero value is the master bus.
 	bus: Audio_Bus,
 
@@ -1574,7 +1802,6 @@ State :: struct {
 	allocator: runtime.Allocator,
 	frame_arena: runtime.Arena,
 	frame_allocator: runtime.Allocator,
-	platform: Platform_Interface,
 	platform_state: rawptr,
 	render_backend: Render_Backend_Interface,
 	render_backend_state: rawptr,
@@ -1601,6 +1828,11 @@ State :: struct {
 	mouse_button_went_down: #sparse [Mouse_Button]bool,
 	mouse_button_went_up: #sparse [Mouse_Button]bool,
 	mouse_button_is_held: #sparse [Mouse_Button]bool,
+
+	touches: [dynamic; MAX_TOUCHES]Touch,
+
+	// See `set_touch_events_from_mouse`.
+	touch_events_from_mouse: bool,
 
 	gamepad_button_went_down: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
 	gamepad_button_went_up: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
@@ -1643,6 +1875,11 @@ State :: struct {
 	// `proj_matrix * view_matrix`. Kept around because every draw call needs it. Update it with
 	// `_update_view_projection`.
 	view_projection: Mat4,
+
+	z: f32,
+	depth_test: bool,
+	depth_range_min: f32,
+	depth_range_max: f32,
 
 	vertex_buffer_cpu: []u8,
 	vertex_buffer_cpu_used: int,
@@ -1688,6 +1925,37 @@ Mouse_Button :: enum {
 	Right,
 	Middle,
 	Max = 255,
+}
+
+// The maximum number of touches Karl2D tracks at once. Ten fingers, plus the one
+// `set_touch_events_from_mouse` makes from the mouse.
+MAX_TOUCHES :: 11
+
+// Identifies one finger for as long as it stays on the screen. Stable from the moment the touch
+// goes down until it goes up. Ids may be reused after that.
+Touch_Id :: distinct u64
+
+// The id of the touch synthesized by `set_touch_events_from_mouse`. Never collides with a real id.
+EMULATED_TOUCH_ID :: max(Touch_Id)
+
+Touch :: struct {
+	id: Touch_Id,
+
+	// Measured from the top-left corner of the window, like `get_mouse_position`.
+	position: Vec2,
+
+	// How many pixels the touch moved between the previous and the current frame.
+	delta: Vec2,
+
+	// The touch started this frame.
+	went_down: bool,
+
+	// The touch ended this frame. It stays in the list for this one frame, so you can react to it.
+	went_up: bool,
+
+	// The OS threw the touch away, for example due to palm rejection or the window losing focus.
+	// `went_up` is set as well, so code that doesn't care about the difference still works.
+	cancelled: bool,
 }
 
 // Based on Raylib / GLFW
@@ -1882,6 +2150,10 @@ Event :: union {
 	Event_Window_Focused,
 	Event_Window_Unfocused,
 	Event_Window_Scale_Changed,
+	Event_Touch_Went_Down,
+	Event_Touch_Moved,
+	Event_Touch_Went_Up,
+	Event_Touch_Cancelled,
 }
 
 Event_Key_Went_Down :: struct {
@@ -1960,3 +2232,11 @@ Event_Window_Scale_Changed :: struct {
 Event_Window_Focused :: struct {}
 
 Event_Window_Unfocused :: struct {}
+
+Event_Touch_Went_Down :: struct { id: Touch_Id, position: Vec2 }
+Event_Touch_Moved     :: struct { id: Touch_Id, position: Vec2 }
+Event_Touch_Went_Up   :: struct { id: Touch_Id, position: Vec2 }
+
+// No position: not every platform knows where a cancelled touch was. The touch keeps the last
+// position it was seen at.
+Event_Touch_Cancelled :: struct { id: Touch_Id }

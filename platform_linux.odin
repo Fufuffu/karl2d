@@ -30,6 +30,7 @@ PLATFORM_LINUX :: Platform_Interface {
 	get_window_position = linux_get_window_position,
 	get_window_scale = linux_get_window_scale,
 	set_window_mode = linux_set_window_mode,
+	set_window_icon = linux_set_window_icon,
 	set_cursor_hidden = linux_set_cursor_hidden,
 	is_cursor_hidden = linux_is_cursor_hidden,
 	set_mouse_locked = linux_set_mouse_locked,
@@ -61,12 +62,63 @@ linux_init :: proc(
 	assert(platform_state != nil)
 	s = (^Linux_State)(platform_state)
 	s.allocator = allocator
-	xdg_session_type := os.get_env("XDG_SESSION_TYPE", frame_allocator)
-	
-	if xdg_session_type == "wayland" {
-		s.win = LINUX_WINDOW_WAYLAND
-	} else {
-		s.win = LINUX_WINDOW_X11
+	// Each `try_load` opens a windowing system's libraries and checks that a server is listening,
+	// so a Wayland session picks Wayland, an X11 session finds no compositor and falls through,
+	// and a machine with only one of the two installed gets the one it has. Nothing here reads the
+	// session type: `display_connect` and `OpenDisplay` already look at the environment variables
+	// that matter, and answering the question by asking the server is more reliable than guessing
+	// from a variable that logind may not have set at all.
+	//
+	// Wayland goes first, the way SDL and GLFW order them. `KARL2D_LINUX_WINDOWING` swaps the
+	// order, for when both work but the preferred one behaves badly.
+	first := LINUX_WINDOW_WAYLAND
+	second := LINUX_WINDOW_X11
+
+	// Whether the player asked for a particular windowing system. Only then is it worth saying
+	// that the first choice was turned down. The default order falling through to X11 is ordinary
+	// detection on an X11 machine, not something anyone needs to read about.
+	preference_given := false
+	windowing_preference := os.get_env("KARL2D_LINUX_WINDOWING", frame_allocator)
+
+	switch windowing_preference {
+	case "":
+
+	case "wayland":
+		preference_given = true
+
+	case "x11":
+		first = LINUX_WINDOW_X11
+		second = LINUX_WINDOW_WAYLAND
+		preference_given = true
+
+	case:
+		log.warnf(
+			"Ignoring KARL2D_LINUX_WINDOWING=%v. It has to be \"wayland\" or \"x11\".",
+			windowing_preference,
+		)
+	}
+
+	s.win = first
+	first_failure_reason, first_ok := s.win.try_load(frame_allocator)
+
+	if !first_ok {
+		s.win = second
+		second_failure_reason, second_ok := s.win.try_load(frame_allocator)
+
+		if !second_ok {
+			// The reasons go in the panic itself rather than only in the log above it: a game
+			// that raises the log level past info would otherwise be told to read reasons that
+			// were never printed.
+			log.panicf(
+				"Found neither Wayland nor X11. Karl2D needs one of them. %s %s",
+				first_failure_reason,
+				second_failure_reason,
+			)
+		}
+
+		if preference_given {
+			log.info(first_failure_reason)
+		}
 	}
 
 	win_state_alloc_error: runtime.Allocator_Error
@@ -614,6 +666,10 @@ linux_set_window_mode :: proc(window_mode: Window_Mode) {
 	s.win.set_window_mode(window_mode)
 }
 
+linux_set_window_icon :: proc(image: Image, warn_if_unsupported: bool) -> bool {
+	return s.win.set_window_icon(image, warn_if_unsupported)
+}
+
 linux_set_cursor_hidden :: proc(hidden: bool) {
 	s.win.set_cursor_hidden(hidden)
 }
@@ -630,7 +686,7 @@ linux_is_mouse_locked :: proc() -> bool {
 	return s.win.is_mouse_locked()
 }
 
-linux_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cursor {
+linux_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) {
 	return s.win.create_custom_cursor(image, hotspot)
 }
 
@@ -682,6 +738,17 @@ Linux_State :: struct {
 Linux_Window_Interface :: struct #all_or_none {
 	state_size: proc() -> int,
 
+	// Reports whether this windowing system can be used, by loading its shared libraries and
+	// connecting to its server. The connection is thrown away again; what lasts is the libraries,
+	// which stay loaded for `init` to use. Returns false when either step fails, along with a
+	// reason for the caller to log or panic with, and closes the libraries again when it does.
+	try_load: proc(
+		failure_reason_allocator: runtime.Allocator,
+	) -> (
+		failure_reason: string,
+		ok: bool,
+	),
+
 	init: proc(
 		window_state: rawptr,
 		screen_width: int,
@@ -702,12 +769,13 @@ Linux_Window_Interface :: struct #all_or_none {
 	get_screen_height: proc() -> int,
 	get_window_scale: proc() -> f32,
 	set_window_mode: proc(window_mode: Window_Mode),
+	set_window_icon: proc(image: Image, warn_if_unsupported: bool) -> bool,
 	set_cursor_hidden: proc(hidden: bool),
 	is_cursor_hidden: proc() -> bool,
 	set_mouse_locked: proc(locked: bool),
 	is_mouse_locked: proc() -> bool,
 
-	create_custom_cursor: proc(image: Image, hotspot: [2]int) -> Custom_Cursor,
+	create_custom_cursor: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool),
 	set_cursor: proc(cursor: Cursor),
 	destroy_custom_cursor: proc(custom_cursor: Custom_Cursor),
 

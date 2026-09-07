@@ -19,6 +19,7 @@ PLATFORM_WINDOWS :: Platform_Interface {
 	set_screen_size = windows_set_screen_size,
 	get_window_scale = windows_get_window_scale,
 	set_window_mode = windows_set_window_mode,
+	set_window_icon = windows_set_window_icon,
 
 	set_cursor_hidden = windows_set_cursor_hidden,
 	is_cursor_hidden = windows_is_cursor_hidden,
@@ -43,6 +44,10 @@ import "core:slice"
 import "base:runtime"
 import hm "core:container/handle_map"
 @require import "log"
+
+// The two icons WM_SETICON can set. Small is the title bar, big is Alt+Tab and the task bar.
+ICON_SMALL :: win32.WPARAM(0)
+ICON_BIG :: win32.WPARAM(1)
 
 windows_state_size :: proc() -> int {
 	return size_of(Windows_State)
@@ -139,6 +144,14 @@ windows_shutdown :: proc() {
 	hm.dynamic_destroy(&s.custom_cursors)
 
 	win32.DestroyWindow(s.hwnd)
+
+	// The window showed this icon until the line above, and an icon that is in use may not be
+	// destroyed.
+	if s.hicon != nil {
+		win32.DestroyIcon(s.hicon)
+		s.hicon = nil
+	}
+
 	delete(s.events)
 }
 
@@ -470,6 +483,9 @@ Windows_State :: struct {
 
 	window_render_glue: Window_Render_Glue,
 
+	// The icon the window currently shows, owned by us. See `windows_set_window_icon`.
+	hicon: win32.HICON,
+
 	// Half of UTF-16 characters when it is a character when the character is outside the Basic
 	// Multilingual Plane (BMP). Emojis are examples of such characters.
 	char_high_surrogate: rune,
@@ -530,6 +546,27 @@ windows_set_window_mode :: proc(window_mode: Window_Mode) {
 	}
 }
 
+windows_set_window_icon :: proc(image: Image, _: bool) -> bool {
+	hicon := windows_create_hicon(image, {0, 0}, true)
+
+	if hicon == nil {
+		return false
+	}
+
+	// Windows scales the bitmap down to the size each of the two icons needs.
+	win32.SendMessageW(s.hwnd, win32.WM_SETICON, ICON_SMALL, win32.LPARAM(uintptr(hicon)))
+	win32.SendMessageW(s.hwnd, win32.WM_SETICON, ICON_BIG, win32.LPARAM(uintptr(hicon)))
+
+	// The window only refers to the icon, so this one has to stay alive until it is replaced, and
+	// the one it was showing is ours to destroy.
+	if s.hicon != nil {
+		win32.DestroyIcon(s.hicon)
+	}
+
+	s.hicon = hicon
+	return true
+}
+
 windows_set_cursor_hidden :: proc(hidden: bool) {
 	win32.ShowCursor(win32.BOOL(!hidden))
 	s.cursor_hidden = hidden
@@ -574,7 +611,12 @@ _windows_teleport_cursor_to_center :: proc() {
 	})
 }
 
-windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cursor {
+// Windows makes cursors and icons out of the same kind of object, so this builds both. Pass
+// `is_icon = false` and a hotspot for a cursor, `is_icon = true` and no hotspot for an icon.
+//
+// Returns nil on failure, having logged which call failed. The caller owns the result and must
+// pass it to `DestroyIcon` when done with it. `DestroyCursor` does the same job.
+windows_create_hicon :: proc(image: Image, hotspot: [2]int, is_icon: bool) -> win32.HICON {
 	// CreateBitmap makes a device-dependent bitmap, which is not documented to support a real
 	// alpha channel. A 32-bit cursor with alpha needs a DIB section instead: CreateDIBSection with
 	// a BITMAPV5HEADER and explicit channel masks, which is also what GLFW and SDL do for this.
@@ -608,7 +650,7 @@ windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cu
 
 	if h_color == nil || dib_pixels == nil {
 		log.errorf("CreateDIBSection failed with %v", win32.GetLastError())
-		return {}
+		return nil
 	}
 
 	// We receive RGBA but the DIB, like GDI generally, wants BGRA.
@@ -627,21 +669,31 @@ windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cu
 	h_mask := win32.CreateBitmap(i32(image.width), i32(image.height), 1, 1, raw_data(mask_bits))
 
 	ii := win32.ICONINFO {
-		fIcon    = false,
+		fIcon    = win32.BOOL(is_icon),
 		xHotspot = u32(hotspot.x),
 		yHotspot = u32(hotspot.y),
 		hbmColor = h_color,
 		hbmMask  = h_mask,
 	}
-	hcursor := (win32.HCURSOR)(win32.CreateIconIndirect(&ii))
+	hicon := win32.CreateIconIndirect(&ii)
 
 	// CreateIconIndirect copies both bitmaps, so we own them again whether or not it worked.
 	win32.DeleteObject(cast(win32.HGDIOBJ) h_color)
 	win32.DeleteObject(cast(win32.HGDIOBJ) h_mask)
 
-	if hcursor == nil {
+	if hicon == nil {
 		log.errorf("CreateIconIndirect failed with %v", win32.GetLastError())
-		return {}
+		return nil
+	}
+
+	return hicon
+}
+
+windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) {
+	hcursor := (win32.HCURSOR)(windows_create_hicon(image, hotspot, false))
+
+	if hcursor == nil {
+		return {}, false
 	}
 
 	handle, add_err := hm.add(&s.custom_cursors, Windows_Cursor{hcursor = hcursor})
@@ -649,10 +701,10 @@ windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> Custom_Cu
 	if add_err != nil {
 		log.errorf("Failed to create cursor. Error: %v", add_err)
 		win32.DestroyCursor(hcursor)
-		return {}
+		return {}, false
 	}
 
-	return handle
+	return handle, true
 }
 
 windows_set_cursor :: proc(cursor: Cursor) {
@@ -740,6 +792,11 @@ _windows_window_proc :: proc "stdcall" (hwnd: win32.HWND, msg: win32.UINT, wpara
 
 	case win32.WM_CLOSE:
 		append(&s.events, Event_Close_Window_Requested{})
+
+		// The default handler destroys the window. We don't want that: it's up to the application
+		// to decide what a close request means, it may want to show a confirmation dialogue. The
+		// window is destroyed in `windows_shutdown`.
+		return 0
 
 	case win32.WM_SYSKEYDOWN, win32.WM_KEYDOWN:
 		repeat := bool(lparam & (1 << 30))
@@ -880,11 +937,27 @@ _windows_window_proc :: proc "stdcall" (hwnd: win32.HWND, msg: win32.UINT, wpara
 		new_dpi := win32.LOWORD(wparam)
 		s.window_scale = f32(new_dpi) / 96.0
 
+		// Windows supplies the outer window rectangle that preserves the window's logical size at
+		// the new DPI. Applying it here is important for apps like AltSnap, where unlike the native
+		// title-bar drag loop, they do not necessarily perform this adjustment on our behalf.
+		suggested_rect := (^win32.RECT)(uintptr(lparam))
+		win32.SetWindowPos(
+			hwnd,
+			{},
+			suggested_rect.left,
+			suggested_rect.top,
+			suggested_rect.right - suggested_rect.left,
+			suggested_rect.bottom - suggested_rect.top,
+			win32.SWP_NOACTIVATE | win32.SWP_NOZORDER,
+		)
+
 		append(&s.events, Event_Window_Scale_Changed {
 			scale = s.window_scale,
 			screen_width = s.screen_width,
 			screen_height = s.screen_height,
 		})
+
+		return 0
 
 	case win32.WM_ENTERSIZEMOVE:
 		s.in_resize_move_state = true

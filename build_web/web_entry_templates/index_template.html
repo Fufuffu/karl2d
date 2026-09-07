@@ -4,10 +4,17 @@
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<title>Karl2D Web Build</title>
+
+		<!-- Karl2D fills in the href: with its default icon at init and from set_window_icon. -->
+		<link id="karl2d-favicon" rel="icon" href="">
 	</head>
 	<body id="body" style="height: 100%; padding: 0; margin: 0; overflow: hidden; background-color: black;">
-		<canvas id="webgl-canvas" oncontextmenu="return false;" onmousedown="event.target.focus()" onkeydown="event.preventDefault()"></canvas>
-	
+		<!-- touch-action: none keeps the browser from turning touches into page scroll/zoom, and stops
+		     it cancelling a gesture Karl2D is in the middle of. The mouse events a browser fires after
+		     a tap are ignored: Karl2D listens for pointer events, which those are not, so a tap cannot
+		     arrive as both a touch and a click. -->
+		<canvas id="webgl-canvas" style="touch-action: none;" oncontextmenu="return false;" onmousedown="event.target.focus()" onkeydown="event.preventDefault()"></canvas>
+
 		<script type="text/javascript" src="audio_backend_web_audio.js"></script>
 		<script type="text/javascript" src="libktx_read.js"></script>
 		<script type="text/javascript" src="ktx2_backend_web.js"></script>
