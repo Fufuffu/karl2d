@@ -14,6 +14,7 @@ HOVER_DURATION :: f32(0.1)
 SCROLLBAR_WIDTH :: f32(12)
 SCROLLBAR_MIN_THUMB :: f32(20)
 CLIP_STACK_SIZE :: 16
+MAX_WINDOWS :: 16
 
 FONT_SIZE_DEF: f32 : 20.0
 COLOR_DEF :: Color{0, 0, 0, 0}
@@ -37,6 +38,23 @@ Button_State :: enum {
 	Released,
 }
 
+Window_Option :: enum {
+	Pinned,
+	Resizable,
+	Undecorated,
+	Borderless,
+	No_Padding,
+}
+
+Window_Options :: bit_set[Window_Option]
+
+Window :: struct {
+	id:       u64,
+	rect:     Rect,
+	min_size: Vec2,
+	options:  Window_Options,
+}
+
 UI_Animation :: struct {
 	widget:     uintptr,
 	t:          f32,
@@ -50,6 +68,10 @@ UI_Hover :: struct {
 }
 
 Theme :: struct {
+	window_border: Color,
+	window_bg:     Color,
+	title_bg:      Color,
+	title_text:    Color,
 	panel_bg:      Color,
 	widget_bg:     Color,
 	widget_hover:  Color,
@@ -86,6 +108,12 @@ UI_Context :: struct {
 	scroll_drag_start_y:       f32,
 	scroll_drag_start_offset:  f32,
 	scroll_delta:              f32,
+	windows:                   [MAX_WINDOWS]Window,
+	num_windows:               int,
+	current_window:            ^Window,
+	resizing_window:           ^Window,
+	rendered_rects:            [MAX_WINDOWS]Rect,
+	num_rendered_rects:        int,
 }
 
 // -------- Library lifecycle management ----------
@@ -98,6 +126,10 @@ init :: proc(padding: f32, corner: f32, allocator := context.allocator) -> ^UI_C
 	ui_context.font_height = k2.measure_text("A", FONT_SIZE_DEF).y
 	ui_context.row_height = ui_context.font_height * 1.5
 	ui_context.theme = Theme {
+		window_border = Color{0xB0, 0xCC, 0xE7, 0xFF},
+		window_bg     = Color{0xF2, 0xF6, 0xFA, 0xFF},
+		title_bg      = Color{0xD8, 0xE6, 0xF4, 0xFF},
+		title_text    = Color{0x2C, 0x3E, 0x55, 0xFF},
 		panel_bg      = Color{0xF2, 0xF6, 0xFA, 0xFF},
 		widget_bg     = Color{0xD8, 0xE6, 0xF4, 0xFF},
 		widget_hover  = Color{0xC3, 0xDB, 0xEE, 0xFF},
@@ -131,12 +163,15 @@ update_scroll_delta :: proc(ui_context: ^UI_Context, delta: f32) {
 }
 
 begin_frame :: proc(ui_context: ^UI_Context, dt: f32) {
+	assert(ui_context.current_window == nil)
+	ui_context.num_rendered_rects = 0
 	ui_context.button_id = 1 // 0 is reserved as "no widget"
 	ui_context.animation.t = min(1.0, ui_context.animation.t + dt / ANIMATION_DURATION)
 	ui_context.hover.t = min(1.0, ui_context.hover.t + dt / HOVER_DURATION)
 }
 
 end_frame :: proc(ui_context: ^UI_Context) {
+	assert(ui_context.current_window == nil)
 	if ui_context.animation.t >= 1.0 {
 		ui_context.animation.widget = 0
 	}
@@ -144,12 +179,141 @@ end_frame :: proc(ui_context: ^UI_Context) {
 	if ui_context.mouse_button == .Released {
 		ui_context.dragging_object = 0
 		ui_context.active_scroll = nil
+		ui_context.resizing_window = nil
 	}
 	ui_context.scroll_delta = 0
 	ui_context.mouse_button = .Idle
 }
 
 // -------- Layout functions ----------
+// Use a stable, unique name and lay out widgets from the returned content rect each frame.
+begin_window :: proc(
+	ui_context: ^UI_Context,
+	name: string,
+	rect: Rect,
+	options: Window_Options = {},
+) -> Rect {
+	assert(ui_context.current_window == nil)
+	assert(ui_context.clip_depth == 0)
+	assert(ui_context.panel_depth == 0)
+	assert(ui_context.num_rendered_rects < MAX_WINDOWS)
+
+	id := hash_name(name)
+	for &window in ui_context.windows[:ui_context.num_windows] {
+		if window.id == id {
+			ui_context.current_window = &window
+			break
+		}
+	}
+	if ui_context.current_window == nil {
+		assert(ui_context.num_windows < MAX_WINDOWS)
+		ui_context.current_window = &ui_context.windows[ui_context.num_windows]
+		ui_context.num_windows += 1
+		ui_context.current_window^ = Window {
+			id       = id,
+			rect     = rect,
+			min_size = {
+				k2.measure_text(name, FONT_SIZE_DEF).x + ui_context.padding * 2,
+				ui_context.row_height * 2,
+			},
+			options  = options,
+		}
+	}
+
+	window := ui_context.current_window
+	window_id := uintptr(rawptr(window))
+	if .Pinned in window.options do window.rect = rect
+
+	handle_rect := Rect {
+		window.rect.x + window.rect.w - ui_context.corner,
+		window.rect.y + window.rect.h - ui_context.corner,
+		ui_context.corner,
+		ui_context.corner,
+	}
+	handle_hit_size := max(ui_context.corner, ui_context.font_height)
+	handle_hit_rect := Rect {
+		window.rect.x + window.rect.w - handle_hit_size,
+		window.rect.y + window.rect.h - handle_hit_size,
+		handle_hit_size,
+		handle_hit_size,
+	}
+	if .Resizable in window.options && ui_context.mouse_button == .Pressed &&
+	   is_mouse_in_rect(ui_context, handle_hit_rect) && ui_context.dragging_object == 0 &&
+	   ui_context.active_scroll == nil && ui_context.resizing_window == nil {
+		ui_context.resizing_window = window
+		ui_context.dragging_offset = Vec2{window.rect.x + window.rect.w, window.rect.y + window.rect.h} - ui_context.mouse_pos
+	}
+	if ui_context.mouse_down && ui_context.resizing_window == window {
+		window.rect.w = max(ui_context.mouse_pos.x + ui_context.dragging_offset.x - window.rect.x, window.min_size.x)
+		window.rect.h = max(ui_context.mouse_pos.y + ui_context.dragging_offset.y - window.rect.y, window.min_size.y)
+	}
+
+	title_rect := Rect {
+		window.rect.x + ui_context.padding,
+		window.rect.y + ui_context.padding,
+		window.rect.w - ui_context.padding * 2,
+		ui_context.row_height,
+	}
+	if .Undecorated not_in window.options && .Pinned not_in window.options {
+		if ui_context.mouse_button == .Pressed && is_mouse_in_rect(ui_context, title_rect) &&
+		   ui_context.dragging_object == 0 && ui_context.resizing_window == nil && ui_context.active_scroll == nil {
+			ui_context.dragging_object = window_id
+			ui_context.dragging_offset = ui_context.mouse_pos - Vec2{window.rect.x, window.rect.y}
+		}
+		if ui_context.mouse_down && ui_context.dragging_object == window_id {
+			pos := ui_context.mouse_pos - ui_context.dragging_offset
+			window.rect.x = pos.x
+			window.rect.y = pos.y
+		}
+	}
+
+	// border
+	if .Borderless not_in window.options {
+		draw_rounded_rect(window.rect, ui_context.corner * 0.5, ui_context.theme.window_border)
+	}
+
+	bg_rect := window.rect
+	if .Undecorated in window.options {
+		if .No_Padding not_in window.options do cut_inset(&bg_rect, ui_context.padding, ui_context.padding)
+	} else {
+		title_rect.x = window.rect.x + ui_context.padding
+		title_rect.y = window.rect.y + ui_context.padding
+
+		// title background and text
+		draw_rounded_rect(title_rect, ui_context.corner, ui_context.theme.title_bg)
+		draw_text_align(ui_context, title_rect, name, ui_context.theme.title_text)
+		cut_inset(&bg_rect, ui_context.padding, ui_context.padding)
+		cut_top(&bg_rect, ui_context.row_height + ui_context.padding)
+	}
+
+	// content background
+	draw_rounded_rect(bg_rect, ui_context.corner, ui_context.theme.window_bg)
+	content_rect := bg_rect
+	cut_inset(&content_rect, ui_context.padding, ui_context.padding)
+	content_rect.w = max(0, content_rect.w)
+	content_rect.h = max(0, content_rect.h)
+
+	// resize handle
+	if .Resizable in window.options {
+		handle_rect.x = window.rect.x + window.rect.w - handle_rect.w
+		handle_rect.y = window.rect.y + window.rect.h - handle_rect.h
+		draw_rounded_rect(handle_rect, 0, ui_context.theme.separator)
+	}
+
+	ui_context.rendered_rects[ui_context.num_rendered_rects] = window.rect
+	ui_context.num_rendered_rects += 1
+	push_clip_rect(ui_context, content_rect)
+	return content_rect
+}
+
+end_window :: proc(ui_context: ^UI_Context) {
+	assert(ui_context.current_window != nil)
+	assert(ui_context.panel_depth == 0)
+	assert(ui_context.clip_depth == 1)
+	pop_clip_rect(ui_context)
+	ui_context.current_window = nil
+}
+
 cut_left :: proc(rect: ^Rect, width: f32) -> Rect {
 	result := Rect{rect.x, rect.y, width, rect.h}
 
@@ -234,35 +398,18 @@ panel_end :: proc(ui_context: ^UI_Context) {
 
 begin_scroll :: proc(ui_context: ^UI_Context, viewport: Rect, state: ^Scroll_State) -> Rect {
 	state.offset_y = clamp(state.offset_y, 0, max(0, state.content_height - viewport.h))
-	assert(ui_context.clip_depth < len(ui_context.clip_stack))
-	ui_context.clip_stack[ui_context.clip_depth] = ui_context.current_clip
-	ui_context.clip_depth += 1
 
 	// content clip, leaving room for the scrollbar
 	content_rect := viewport
 	if state.content_height > viewport.h do content_rect.w = max(0, content_rect.w - SCROLLBAR_WIDTH)
-	clip_rect := content_rect
-	if ui_context.clip_depth > 1 {
-		outer := ui_context.current_clip
-		x1 := min(clip_rect.x + clip_rect.w, outer.x + outer.w)
-		y1 := min(clip_rect.y + clip_rect.h, outer.y + outer.h)
-		clip_rect.x = max(clip_rect.x, outer.x)
-		clip_rect.y = max(clip_rect.y, outer.y)
-		clip_rect.w = max(0, x1 - clip_rect.x)
-		clip_rect.h = max(0, y1 - clip_rect.y)
-	}
-	ui_context.current_clip = clip_rect
-	set_clip_rect(ui_context.current_clip)
+	push_clip_rect(ui_context, content_rect)
 	content_rect.y -= state.offset_y
 	content_rect.h = state.content_height
 	return content_rect
 }
 
 end_scroll :: proc(ui_context: ^UI_Context, viewport: Rect, state: ^Scroll_State) {
-	assert(ui_context.clip_depth > 0)
-	ui_context.clip_depth -= 1
-	ui_context.current_clip = ui_context.clip_stack[ui_context.clip_depth]
-	set_clip_rect(ui_context.current_clip, enabled = ui_context.clip_depth > 0)
+	pop_clip_rect(ui_context)
 	if state.content_height <= viewport.h || viewport.h <= 0 do return
 
 	id := uintptr(rawptr(state))
@@ -663,6 +810,45 @@ separator :: proc(ui_context: ^UI_Context, rect: Rect) {
 }
 
 // -------- Utils ----------
+hash_name :: proc(name: string) -> u64 {
+	hash: u64 = 0xcbf29ce484222325
+	for byte in transmute([]u8)name do hash = (hash ~ u64(byte)) * 0x100000001b3
+	return hash
+}
+
+push_clip_rect :: proc(ui_context: ^UI_Context, rect: Rect) {
+	assert(ui_context.clip_depth < len(ui_context.clip_stack))
+	ui_context.clip_stack[ui_context.clip_depth] = ui_context.current_clip
+	ui_context.clip_depth += 1
+
+	clip_rect := rect
+	if ui_context.clip_depth > 1 {
+		outer := ui_context.current_clip
+		x1 := min(clip_rect.x + clip_rect.w, outer.x + outer.w)
+		y1 := min(clip_rect.y + clip_rect.h, outer.y + outer.h)
+		clip_rect.x = max(clip_rect.x, outer.x)
+		clip_rect.y = max(clip_rect.y, outer.y)
+		clip_rect.w = max(0, x1 - clip_rect.x)
+		clip_rect.h = max(0, y1 - clip_rect.y)
+	}
+	ui_context.current_clip = clip_rect
+	set_clip_rect(ui_context.current_clip)
+}
+
+pop_clip_rect :: proc(ui_context: ^UI_Context) {
+	assert(ui_context.clip_depth > 0)
+	ui_context.clip_depth -= 1
+	ui_context.current_clip = ui_context.clip_stack[ui_context.clip_depth]
+	set_clip_rect(ui_context.current_clip, enabled = ui_context.clip_depth > 0)
+}
+
+is_point_in_any_window :: proc(ui_context: ^UI_Context, point: Vec2) -> bool {
+	for rect in ui_context.rendered_rects[:ui_context.num_rendered_rects] {
+		if k2.point_in_rect(point, rect) do return true
+	}
+	return false
+}
+
 is_mouse_in_rect :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
 	if ui_context.clip_depth > 0 {
 		if !k2.point_in_rect(ui_context.mouse_pos, ui_context.current_clip) do return false

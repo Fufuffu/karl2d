@@ -16,6 +16,10 @@ page_scroll: ui.Scroll_State
 page_volume: f32 = 65
 page_notifications := true
 page_quality: u32 = 1
+popup_open: bool
+popup_rect: k2.Rect
+popup_enabled := true
+popup_value: f32 = 50
 
 main :: proc() {
 	init()
@@ -42,10 +46,27 @@ step :: proc() -> bool {
 	if k2.mouse_button_went_down(.Left) do ui.update_mouse_button(ui_context, .Pressed)
 	else if k2.mouse_button_went_up(.Left) do ui.update_mouse_button(ui_context, .Released)
 
-	k2.clear({0xE3, 0xEB, 0xF3, 0xFF})
+	k2.clear(ui_context.theme.window_bg)
 
 	ui.begin_frame(ui_context, dt)
-	draw_ui()
+	if popup_open && (k2.point_in_rect(mouse_pos, popup_rect) ||
+	   ui_context.dragging_object != 0 || ui_context.resizing_window != nil) {
+		mouse_button := ui_context.mouse_button
+		mouse_down := ui_context.mouse_down
+		scroll_delta := ui_context.scroll_delta
+		ui_context.mouse_pos = {-1, -1}
+		ui_context.mouse_button = .Idle
+		ui_context.mouse_down = false
+		ui_context.scroll_delta = 0
+		draw_ui()
+		ui_context.mouse_pos = mouse_pos
+		ui_context.mouse_button = mouse_button
+		ui_context.mouse_down = mouse_down
+		ui_context.scroll_delta = scroll_delta
+	} else {
+		draw_ui()
+	}
+	if popup_open do draw_popup()
 	ui.end_frame(ui_context)
 
 	k2.present()
@@ -74,7 +95,7 @@ draw_ui :: proc() {
 
 	row = ui.cut_row(&left_panel_rect, row_height * 1.3, gap * 0.8)
 	ui.cut_inset(&row, ui_context.padding, ui_context.padding * 0.25)
-	ui.button_label(ui_context, row, "Launch")
+	if ui.button_label(ui_context, row, "Open window") do popup_open = true
 
 	slider_rect := ui.cut_row(
 		&left_panel_rect,
@@ -99,6 +120,24 @@ draw_ui :: proc() {
 	image_rect := ui.cut_row(&left_panel_rect, min(left_panel_rect.w * 0.75, max(0, left_panel_rect.h)), ui_context.padding)
 	ui.cut_inset(&image_rect, ui_context.padding, ui_context.padding * 0.25)
 	ui.image(ui_context, image_rect, image_texture)
+}
+
+draw_popup :: proc() {
+	window_size := k2.get_screen_size()
+	size := k2.Vec2{window_size.x * 0.35, max(window_size.y * 0.4, ui_context.row_height * 8)}
+	initial_rect := k2.Rect{(window_size.x - size.x) * 0.5, (window_size.y - size.y) * 0.5, size.x, size.y}
+	content := ui.begin_window(ui_context, "Quick settings", initial_rect, {.Resizable})
+	defer ui.end_window(ui_context)
+	popup_rect = ui_context.current_window.rect
+
+	ui.label(ui_context, ui.cut_standard_row(ui_context, &content), "Drag the title bar to move", hor_align = .Left)
+	content = ui.panel(ui_context, content, ui_context.padding * 2)
+	defer ui.panel_end(ui_context)
+
+	ui.toggle(ui_context, ui.cut_standard_row(ui_context, &content), "Enabled", &popup_enabled)
+	slider_rect := ui.cut_row(&content, ui_context.row_height * 2 + ui_context.padding, ui_context.padding)
+	ui.slider(ui_context, slider_rect, "Level", 0, 100, 1, &popup_value, "%.0f%%")
+	if ui.button_label(ui_context, ui.cut_standard_row(ui_context, &content), "Close") do popup_open = false
 }
 
 draw_page :: proc(rect: k2.Rect, gap: f32) {
