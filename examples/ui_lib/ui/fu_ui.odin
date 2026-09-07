@@ -542,12 +542,13 @@ slider :: proc(
 
 	norm_value := (value^ - min_value) / (max_value - min_value)
 	thumb_x := norm_value * track_rect.w + track_rect.x
-	thumb_size := ui_context.font_height - 4
+	thumb_size := ui_context.font_height
 	half_size := thumb_size * 0.5
 
 	thumb_rect := Rect{thumb_x - half_size, center_y - half_size, thumb_size, thumb_size}
 
-	track_hovered := is_mouse_in_rect(ui_context, track_rect)
+	track_hit_rect := Rect{track_rect.x, center_y - half_size, track_rect.w, thumb_size}
+	track_hovered := is_mouse_in_rect(ui_context, track_hit_rect)
 	thumb_hovered := is_mouse_in_rect(ui_context, thumb_rect)
 
 	track_color :=
