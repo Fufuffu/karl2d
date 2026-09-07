@@ -11,6 +11,9 @@ Color :: k2.Color
 
 ANIMATION_DURATION :: f32(0.2)
 HOVER_DURATION :: f32(0.1)
+SCROLLBAR_WIDTH :: f32(12)
+SCROLLBAR_MIN_THUMB :: f32(20)
+CLIP_STACK_SIZE :: 16
 
 FONT_SIZE_DEF: f32 : 20.0
 COLOR_DEF :: Color{0, 0, 0, 0}
@@ -47,6 +50,7 @@ UI_Hover :: struct {
 }
 
 Theme :: struct {
+	panel_bg:      Color,
 	widget_bg:     Color,
 	widget_hover:  Color,
 	widget_active: Color,
@@ -55,20 +59,33 @@ Theme :: struct {
 	separator:     Color,
 }
 
+Scroll_State :: struct {
+	offset_y:       f32,
+	content_height: f32,
+}
+
 UI_Context :: struct {
-	mouse_pos:       Vec2,
-	mouse_button:    Button_State,
-	mouse_down:      b32,
-	padding:         f32,
-	corner:          f32,
-	font_height:     f32,
-	row_height:      f32,
-	theme:           Theme,
-	button_id:       uintptr,
-	animation:       UI_Animation,
-	hover:           UI_Hover,
-	dragging_object: uintptr,
-	dragging_offset: Vec2,
+	mouse_pos:                 Vec2,
+	mouse_button:              Button_State,
+	mouse_down:                b32,
+	padding:                   f32,
+	corner:                    f32,
+	font_height:               f32,
+	row_height:                f32,
+	theme:                     Theme,
+	button_id:                 uintptr,
+	animation:                 UI_Animation,
+	hover:                     UI_Hover,
+	dragging_object:           uintptr,
+	dragging_offset:           Vec2,
+	panel_depth:               int,
+	current_clip:              Rect,
+	clip_stack:                [CLIP_STACK_SIZE]Rect,
+	clip_depth:                int,
+	active_scroll:             ^Scroll_State,
+	scroll_drag_start_y:       f32,
+	scroll_drag_start_offset:  f32,
+	scroll_delta:              f32,
 }
 
 // -------- Library lifecycle management ----------
@@ -81,6 +98,7 @@ init :: proc(padding: f32, corner: f32, allocator := context.allocator) -> ^UI_C
 	ui_context.font_height = k2.measure_text("A", FONT_SIZE_DEF).y
 	ui_context.row_height = ui_context.font_height * 1.5
 	ui_context.theme = Theme {
+		panel_bg      = Color{0xF2, 0xF6, 0xFA, 0xFF},
 		widget_bg     = Color{0xD8, 0xE6, 0xF4, 0xFF},
 		widget_hover  = Color{0xC3, 0xDB, 0xEE, 0xFF},
 		widget_active = Color{0xB0, 0xCC, 0xE7, 0xFF},
@@ -108,6 +126,10 @@ update_mouse_button :: proc(ui_context: ^UI_Context, state: Button_State) {
 	}
 }
 
+update_scroll_delta :: proc(ui_context: ^UI_Context, delta: f32) {
+	ui_context.scroll_delta = delta
+}
+
 begin_frame :: proc(ui_context: ^UI_Context, dt: f32) {
 	ui_context.button_id = 1 // 0 is reserved as "no widget"
 	ui_context.animation.t = min(1.0, ui_context.animation.t + dt / ANIMATION_DURATION)
@@ -121,7 +143,9 @@ end_frame :: proc(ui_context: ^UI_Context) {
 
 	if ui_context.mouse_button == .Released {
 		ui_context.dragging_object = 0
+		ui_context.active_scroll = nil
 	}
+	ui_context.scroll_delta = 0
 	ui_context.mouse_button = .Idle
 }
 
@@ -190,6 +214,102 @@ cut_standard_col :: proc(ui_context: ^UI_Context, rect: ^Rect, col_width: f32) -
 }
 
 // -------- Widgets ----------
+panel :: proc(ui_context: ^UI_Context, rect: Rect, inset_padding: f32) -> Rect {
+	darken_factor := max(1 - f32(ui_context.panel_depth + 1) * 0.05, 0.7)
+	panel_color := ui_context.theme.panel_bg
+	for i in 0 ..< 3 do panel_color[i] = u8(f32(panel_color[i]) * darken_factor)
+
+	// panel background
+	draw_rounded_rect(rect, ui_context.corner, panel_color)
+	ui_context.panel_depth += 1
+	content_rect := rect
+	cut_inset(&content_rect, inset_padding, inset_padding)
+	return content_rect
+}
+
+panel_end :: proc(ui_context: ^UI_Context) {
+	assert(ui_context.panel_depth > 0)
+	ui_context.panel_depth -= 1
+}
+
+begin_scroll :: proc(ui_context: ^UI_Context, viewport: Rect, state: ^Scroll_State) -> Rect {
+	state.offset_y = clamp(state.offset_y, 0, max(0, state.content_height - viewport.h))
+	assert(ui_context.clip_depth < len(ui_context.clip_stack))
+	ui_context.clip_stack[ui_context.clip_depth] = ui_context.current_clip
+	ui_context.clip_depth += 1
+
+	// content clip, leaving room for the scrollbar
+	content_rect := viewport
+	if state.content_height > viewport.h do content_rect.w = max(0, content_rect.w - SCROLLBAR_WIDTH)
+	clip_rect := content_rect
+	if ui_context.clip_depth > 1 {
+		outer := ui_context.current_clip
+		x1 := min(clip_rect.x + clip_rect.w, outer.x + outer.w)
+		y1 := min(clip_rect.y + clip_rect.h, outer.y + outer.h)
+		clip_rect.x = max(clip_rect.x, outer.x)
+		clip_rect.y = max(clip_rect.y, outer.y)
+		clip_rect.w = max(0, x1 - clip_rect.x)
+		clip_rect.h = max(0, y1 - clip_rect.y)
+	}
+	ui_context.current_clip = clip_rect
+	set_clip_rect(ui_context.current_clip)
+	content_rect.y -= state.offset_y
+	content_rect.h = state.content_height
+	return content_rect
+}
+
+end_scroll :: proc(ui_context: ^UI_Context, viewport: Rect, state: ^Scroll_State) {
+	assert(ui_context.clip_depth > 0)
+	ui_context.clip_depth -= 1
+	ui_context.current_clip = ui_context.clip_stack[ui_context.clip_depth]
+	set_clip_rect(ui_context.current_clip, enabled = ui_context.clip_depth > 0)
+	if state.content_height <= viewport.h || viewport.h <= 0 do return
+
+	id := uintptr(rawptr(state))
+	max_offset := state.content_height - viewport.h
+	track := Rect{viewport.x + viewport.w - SCROLLBAR_WIDTH, viewport.y, SCROLLBAR_WIDTH, viewport.h}
+
+	// scrollbar track
+	draw_rounded_rect(track, ui_context.corner, ui_context.theme.widget_bg)
+	thumb_h := min(viewport.h, max(SCROLLBAR_MIN_THUMB, viewport.h * viewport.h / state.content_height))
+	scroll_range := viewport.h - thumb_h
+	thumb := Rect{track.x, viewport.y + state.offset_y / max_offset * scroll_range, track.w, thumb_h}
+	hovering_thumb := is_mouse_in_rect(ui_context, thumb)
+	hovering_track := is_mouse_in_rect(ui_context, track)
+
+	if is_mouse_in_rect(ui_context, viewport) && ui_context.scroll_delta != 0 {
+		state.offset_y = clamp(state.offset_y - ui_context.scroll_delta * viewport.h * 0.1, 0, max_offset)
+		ui_context.scroll_delta = 0
+		if ui_context.animation.widget == id do ui_context.animation.widget = 0
+	}
+
+	if ui_context.active_scroll == state && ui_context.mouse_down {
+		dy := ui_context.mouse_pos.y - ui_context.scroll_drag_start_y
+		delta := dy / scroll_range * max_offset if scroll_range > 0 else 0
+		state.offset_y = clamp(ui_context.scroll_drag_start_offset + delta, 0, max_offset)
+	} else if ui_context.mouse_button == .Pressed && hovering_thumb && ui_context.dragging_object == 0 {
+		ui_context.active_scroll = state
+		ui_context.scroll_drag_start_y = ui_context.mouse_pos.y
+		ui_context.scroll_drag_start_offset = state.offset_y
+		if ui_context.animation.widget == id do ui_context.animation.widget = 0
+	} else if ui_context.mouse_button == .Pressed && hovering_track && ui_context.dragging_object == 0 {
+		target_y := clamp(ui_context.mouse_pos.y - thumb_h * 0.5, viewport.y, viewport.y + scroll_range)
+		ui_context.animation = UI_Animation {
+			widget     = id,
+			value_key0 = state.offset_y,
+			value_key1 = (target_y - viewport.y) / scroll_range * max_offset if scroll_range > 0 else 0,
+		}
+	}
+	if ui_context.animation.widget == id {
+		state.offset_y = clamp(lerp_float(ui_context.animation.value_key0, ui_context.animation.value_key1, ui_context.animation.t), 0, max_offset)
+	}
+
+	// scrollbar thumb
+	thumb.y = viewport.y + state.offset_y / max_offset * scroll_range
+	thumb_color := ui_context.theme.widget_active if ui_context.active_scroll == state || hovering_thumb else ui_context.theme.widget_hover
+	draw_rounded_rect(thumb, ui_context.corner, thumb_color)
+}
+
 button :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
 	rect := rect
 	id := ui_context.button_id
@@ -205,7 +325,7 @@ button :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
 			ease_in_expo(ui_context.animation.t),
 		)
 		expand_rect(&rect, -ease_impulse(ui_context.animation.t) * 2)
-	} else if k2.point_in_rect(ui_context.mouse_pos, rect) {
+	} else if is_mouse_in_rect(ui_context, rect) {
 		if ui_context.mouse_button == .Pressed && ui_context.animation.widget == 0 {
 			clicked = true
 			ui_context.animation = UI_Animation {
@@ -266,7 +386,7 @@ toggle :: proc(ui_context: ^UI_Context, rect: Rect, label_text: string, value: ^
 		font_height * 2,
 		font_height,
 	}
-	track_hovered := k2.point_in_rect(ui_context.mouse_pos, track_rect)
+	track_hovered := is_mouse_in_rect(ui_context, track_rect)
 	if track_hovered && ui_context.mouse_button == .Pressed {
 		value^ = !value^
 		ui_context.animation = UI_Animation {
@@ -341,7 +461,7 @@ segmented :: proc(ui_context: ^UI_Context, rect: Rect, entries: []string, select
 	for entry, i in entries {
 		button_rect := seg_rect
 		button_rect.y += ui_context.padding
-		if k2.point_in_rect(ui_context.mouse_pos, button_rect) {
+		if is_mouse_in_rect(ui_context, button_rect) {
 			if ui_context.mouse_button == .Pressed {
 				ui_context.animation = UI_Animation {
 					widget     = id,
@@ -427,8 +547,8 @@ slider :: proc(
 
 	thumb_rect := Rect{thumb_x - half_size, center_y - half_size, thumb_size, thumb_size}
 
-	track_hovered := k2.point_in_rect(ui_context.mouse_pos, track_rect)
-	thumb_hovered := k2.point_in_rect(ui_context.mouse_pos, thumb_rect)
+	track_hovered := is_mouse_in_rect(ui_context, track_rect)
+	thumb_hovered := is_mouse_in_rect(ui_context, thumb_rect)
 
 	track_color :=
 		ui_context.theme.widget_hover if (track_hovered || ui_context.dragging_object == id) else ui_context.theme.widget_bg
@@ -542,6 +662,13 @@ separator :: proc(ui_context: ^UI_Context, rect: Rect) {
 }
 
 // -------- Utils ----------
+is_mouse_in_rect :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
+	if ui_context.clip_depth > 0 {
+		if !k2.point_in_rect(ui_context.mouse_pos, ui_context.current_clip) do return false
+	}
+	return k2.point_in_rect(ui_context.mouse_pos, rect)
+}
+
 expand_rect :: #force_inline proc(rect: ^Rect, amount: f32) {
 	rect.x -= amount
 	rect.y -= amount
@@ -550,6 +677,14 @@ expand_rect :: #force_inline proc(rect: ^Rect, amount: f32) {
 }
 
 // -------- Drawing utils ----------
+set_clip_rect :: proc(rect: Rect, enabled := true) {
+	if enabled {
+		k2.set_scissor_rect(rect)
+	} else {
+		k2.set_scissor_rect(nil)
+	}
+}
+
 draw_text_align :: proc(
 	ui_context: ^UI_Context,
 	rect: Rect,
@@ -584,7 +719,10 @@ draw_text_align :: proc(
 }
 
 draw_rounded_rect :: proc(rect: Rect, corner: f32, color: Color) {
-	k2.draw_rect_rounded(rect, corner, color)
+	min_size := min(rect.w, rect.h)
+	if min_size <= 0 do return
+	roundness := clamp(corner * 2 / min_size, 0, 1)
+	k2.draw_rect_rounded(rect, roundness, color)
 }
 
 // -------- Animation helpers ----------
