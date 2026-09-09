@@ -1309,6 +1309,9 @@ reflect_shader_constants :: proc(
 				buf.size = int(cb_desc.Size)
 				buf.bind_point = bind_desc.BindPoint
 				append(d3d_constant_buffers, buf)
+			} else {
+				// Shared buffers already have their constants from the first shader stage.
+				continue
 			}
 
 			for var_idx in 0..<cb_desc.Variables {
