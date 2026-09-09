@@ -7,6 +7,18 @@ atlas. Run from the repository root:
 odin run examples/textured_ui
 ```
 
+Build and serve the web version from the repository root:
+
+```powershell
+odin run build_web -- examples/textured_ui
+python -m http.server 8000 --directory examples/textured_ui/bin/web
+```
+
+Open `http://localhost:8000`. Both platforms share `init`, `step`, and
+`shutdown`; desktop `main` runs the frame loop, while the web wrapper calls
+`step` once per browser frame. Assets are embedded in the build. UI test files
+are excluded from JS builds because `core:testing` requires desktop OS support.
+
 Choose a map waypoint and begin an expedition. Journey progress advances over
 time; arriving updates the journal, spends HP/MP, and awards gold if collection
 is enabled. Use supplies or rest to restore resources. Camp settings pauses the
@@ -59,6 +71,10 @@ to screen-space scissors. `update_mouse_pos` still accepts logical coordinates;
 `update_mouse_screen_pos` performs the camera conversion. With no camera, both
 input and clips retain their original screen-coordinate behavior.
 
+Widget drawing policies live in `ui/styling.odin`, with shared surface, thumb,
+selection, and bar helpers. Atlas regions and theme setup live in `theme.odin`. The scripted integration
+input lives in `smoke.odin`, leaving `main.odin` for the game and its layout.
+
 ## Texture API
 
 `ui.Skin` borrows a texture and specifies a source rectangle and left/top/right/
@@ -73,7 +89,7 @@ draws without changing layout. `ui.image_region` draws a tinted atlas region;
 
 Nine-slicing uses one quad with UV remapping in D3D11, GL, or WebGL shaders.
 Undersized destinations shrink opposing borders proportionally; sampling clamps
-to half-texel atlas bounds. Shader-load failure uses a nine-quad fallback.
+to half-texel atlas bounds. Initialization asserts that the slice shader loads.
 Per-skin uniforms can split draw calls. Skin drawing restores the default shader,
 so keep UI drawing outside other custom shader passes.
 
@@ -119,7 +135,7 @@ odin run examples/textured_ui -define:UI_SMOKE_TEST=true -define:KARL2D_AUDIO_BA
 odin run examples/textured_ui -define:UI_SMOKE_TEST=true -define:KARL2D_AUDIO_BACKEND=nil -define:KARL2D_RENDER_BACKEND=gl
 ```
 
-The 23-frame integration smoke asserts shader loading, independent scrolling,
+The 23-frame integration smoke exercises initialization, independent scrolling,
 modal blocking, dragging, resizing, map selection, expedition start, toggle
 changes, and slider interaction. Camera tests cover fractional scaling, 4K,
 portrait letterboxing, empty clips, clipped input, and the no-camera path.
@@ -127,6 +143,7 @@ Bar tests cover normal, scaled, empty, tiny, and asymmetric end caps.
 D3D11 and GL smoke runs pass, as do D3D11 runs at 2560 x 1600 and 900 x 1200
 (`-define:UI_WIDTH=2560 -define:UI_HEIGHT=1600` sets the initial window size).
 
-WebGL has matching shader sources but has not been browser-tested. Hidden-window
+GL and WebGL share shader sources with backend-specific version headers.
+WebGL has not been browser-tested. Hidden-window
 capture returns a blank image here, so visual high-DPI QA still needs a desktop
 run. The portrait is copied from the repository's space_cat example.

@@ -68,26 +68,25 @@ UI_Hover :: struct {
 }
 
 Theme :: struct {
-	window_skin:                                                         Skin,
-	panel_skin:                                                          Skin,
-	button_skin:                                                         Skin,
-	toggle_thumb_skin, scrollbar_thumb_skin:                             Skin,
-	slider_bar:                                                          Bar_Style,
-	toggle_bar:                                                          Bar_Style,
-	segmented_selection:                                                 Three_Slice,
-	progress_bar:                                                        Bar_Style,
-	scrollbar_track, scrollbar_thumb, scrollbar_hover, scrollbar_active: Color,
-	window_border:                                                       Color,
-	window_bg:                                                           Color,
-	title_bg:                                                            Color,
-	title_text:                                                          Color,
-	panel_bg:                                                            Color,
-	widget_bg:                                                           Color,
-	widget_hover:                                                        Color,
-	widget_active:                                                       Color,
-	text:                                                                Color,
-	accent:                                                              Color,
-	separator:                                                           Color,
+	window_skin, panel_skin, button_skin:    Skin,
+	toggle_thumb_skin, scrollbar_thumb_skin: Skin,
+	slider_bar, toggle_bar, progress_bar:    Bar_Style,
+	segmented_selection:                     Three_Slice,
+	scrollbar_track:                         Color,
+	scrollbar_thumb:                         Color,
+	scrollbar_hover:                         Color,
+	scrollbar_active:                        Color,
+	window_border:                           Color,
+	window_bg:                               Color,
+	title_bg:                                Color,
+	title_text:                              Color,
+	panel_bg:                                Color,
+	widget_bg:                               Color,
+	widget_hover:                            Color,
+	widget_active:                           Color,
+	text:                                    Color,
+	accent:                                  Color,
+	separator:                               Color,
 }
 
 Scroll_State :: struct {
@@ -98,7 +97,6 @@ Scroll_State :: struct {
 UI_Context :: struct {
 	camera:                   Maybe(k2.Camera),
 	slice_shader:             k2.Shader,
-	slice_shader_ok:          bool,
 	mouse_pos:                Vec2,
 	mouse_button:             Button_State,
 	mouse_down:               b32,
@@ -155,22 +153,7 @@ init :: proc(padding: f32, corner: f32, allocator := context.allocator) -> ^UI_C
 		separator        = Color{0x2C, 0x3E, 0x55, 0x40},
 	}
 
-	when k2.RENDER_BACKEND_NAME == "d3d11" {
-		ui_context.slice_shader, ui_context.slice_shader_ok = k2.load_shader_from_bytes(
-			#load("nine_slice.hlsl"),
-			#load("nine_slice.hlsl"),
-		)
-	} else when k2.RENDER_BACKEND_NAME == "gl" {
-		ui_context.slice_shader, ui_context.slice_shader_ok = k2.load_shader_from_bytes(
-			#load("nine_slice_gl.vert"),
-			#load("nine_slice_gl.frag"),
-		)
-	} else when k2.RENDER_BACKEND_NAME == "webgl" {
-		ui_context.slice_shader, ui_context.slice_shader_ok = k2.load_shader_from_bytes(
-			#load("nine_slice_webgl.vert"),
-			#load("nine_slice_webgl.frag"),
-		)
-	}
+	ui_context.slice_shader = load_slice_shader()
 	return ui_context
 }
 
@@ -313,12 +296,7 @@ begin_window :: proc(
 		}
 	}
 
-	// border
-	if ui_context.theme.window_skin.texture.handle != k2.TEXTURE_NONE {
-		draw_skin(ui_context, window.rect, ui_context.theme.window_skin)
-	} else if .Borderless not_in window.options {
-		draw_rounded_rect(window.rect, ui_context.corner * 0.5, ui_context.theme.window_border)
-	}
+	draw_window_frame(ui_context, window)
 
 	bg_rect := window.rect
 	if .Undecorated in window.options {
@@ -334,10 +312,7 @@ begin_window :: proc(
 		cut_top(&bg_rect, ui_context.row_height + ui_context.padding)
 	}
 
-	// content background
-	if ui_context.theme.window_skin.texture.handle == k2.TEXTURE_NONE {
-		draw_rounded_rect(bg_rect, ui_context.corner, ui_context.theme.window_bg)
-	}
+	draw_window_content(ui_context, bg_rect)
 	content_rect := bg_rect
 	if .No_Padding not_in window.options do cut_inset(&content_rect, ui_context.padding, ui_context.padding)
 	content_rect.w = max(0, content_rect.w)
@@ -429,18 +404,7 @@ cut_standard_col :: proc(ui_context: ^UI_Context, rect: ^Rect, col_width: f32) -
 
 // -------- Widgets ----------
 panel :: proc(ui_context: ^UI_Context, rect: Rect, inset_padding: f32, skin := Skin{}) -> Rect {
-	darken_factor := max(1 - f32(ui_context.panel_depth + 1) * 0.05, 0.7)
-	panel_color := ui_context.theme.panel_bg
-	for i in 0 ..< 3 do panel_color[i] = u8(f32(panel_color[i]) * darken_factor)
-
-	// panel background
-	chosen := skin
-	if chosen.texture.handle == k2.TEXTURE_NONE do chosen = ui_context.theme.panel_skin
-	if chosen.texture.handle != k2.TEXTURE_NONE {
-		draw_skin(ui_context, rect, chosen)
-	} else {
-		draw_rounded_rect(rect, ui_context.corner, panel_color)
-	}
+	draw_panel_background(ui_context, rect, skin)
 	ui_context.panel_depth += 1
 	content_rect := rect
 	cut_inset(&content_rect, inset_padding, inset_padding)
@@ -544,20 +508,7 @@ end_scroll :: proc(ui_context: ^UI_Context, viewport: Rect, state: ^Scroll_State
 	thumb.y = viewport.y + state.offset_y / max_offset * scroll_range
 	thumb_color :=
 		ui_context.theme.scrollbar_active if ui_context.active_scroll == state else (ui_context.theme.scrollbar_hover if hovering_thumb else ui_context.theme.scrollbar_thumb)
-	if ui_context.theme.scrollbar_thumb_skin.texture.handle != k2.TEXTURE_NONE {
-		draw_skin(ui_context, thumb, ui_context.theme.scrollbar_thumb_skin, thumb_color)
-	} else {
-		draw_rounded_rect(thumb, ui_context.corner, thumb_color)
-	}
-	// Small grip marks remain visible on short thumbs and at camera zoom.
-	grips := [?]f32{-3, 0, 3}
-	for offset in grips {
-		draw_rounded_rect(
-			{thumb.x + 3, thumb.y + thumb.h * 0.5 + offset, thumb.w - 6, 1},
-			0,
-			ui_context.theme.scrollbar_track,
-		)
-	}
+	draw_scrollbar_thumb(ui_context, thumb, thumb_color)
 }
 
 button :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
@@ -596,13 +547,7 @@ button :: proc(ui_context: ^UI_Context, rect: Rect) -> bool {
 		ui_context.hover.widget = 0
 	}
 
-	if ui_context.theme.button_skin.texture.handle != k2.TEXTURE_NONE {
-		draw_skin(ui_context, rect, ui_context.theme.button_skin, button_color)
-	} else {
-		draw_rounded_rect(rect, ui_context.corner, ui_context.theme.separator)
-		expand_rect(&rect, -1)
-		draw_rounded_rect(rect, ui_context.corner, button_color)
-	}
+	draw_button_background(ui_context, rect, button_color)
 
 	return clicked
 }
@@ -669,42 +614,17 @@ toggle :: proc(ui_context: ^UI_Context, rect: Rect, label_text: string, value: ^
 		toggle_fill = 1 - t
 	}
 
-	// track
-	if bar_style_enabled(ui_context.theme.toggle_bar) {
-		bar_rect := track_rect
-		bar_rect.h = min(track_rect.h, bar_style_height(ui_context.theme.toggle_bar))
-		bar_rect.y += (track_rect.h - bar_rect.h) * 0.5
-		draw_bar(
-			ui_context,
-			bar_rect,
-			toggle_fill,
-			ui_context.theme.toggle_bar,
-			ui_context.theme.separator,
-			ui_context.theme.accent,
-		)
-	} else {
-		draw_rounded_rect(track_rect, track_rect.h * 0.5, track_color)
-	}
+	draw_toggle_track(ui_context, track_rect, toggle_fill, track_color)
 
 	// thumb
 	if track_hovered do expand_rect(&thumb_rect, 1)
-	if ui_context.theme.toggle_thumb_skin.texture.handle != k2.TEXTURE_NONE {
-		thumb_skin := ui_context.theme.toggle_thumb_skin
-		source := thumb_skin.source
-		if source.w == 0 && source.h == 0 do source = k2.get_texture_rect(thumb_skin.texture)
-		// Fit the round artwork without distorting its built-in lower shadow.
-		if source.w > 0 && source.h > 0 {
-			size := min(thumb_rect.w / source.w, thumb_rect.h / source.h)
-			w, h := source.w * size, source.h * size
-			thumb_rect.x += (thumb_rect.w - w) * 0.5
-			thumb_rect.y += (thumb_rect.h - h) * 0.5
-			thumb_rect.w, thumb_rect.h = w, h
-		}
-		tint := Color{205, 215, 240, 255} if track_hovered && ui_context.mouse_down else k2.WHITE
-		draw_skin(ui_context, thumb_rect, thumb_skin, tint)
-	} else {
-		draw_rounded_rect(thumb_rect, thumb_rect.h * 0.5, ui_context.theme.text)
-	}
+	draw_round_thumb(
+		ui_context,
+		thumb_rect,
+		ui_context.theme.toggle_thumb_skin,
+		ui_context.theme.text,
+		track_hovered && ui_context.mouse_down,
+	)
 }
 
 segmented :: proc(
@@ -717,38 +637,31 @@ segmented :: proc(
 	if len(entries) == 0 || rect.w <= 0 || rect.h <= 0 do return
 	id := uintptr(rawptr(selected))
 	segment_width := rect.w / f32(len(entries))
-	textured := ui_context.theme.segmented_selection.texture.handle != k2.TEXTURE_NONE
-	// Use the supplied row for the panel and hit area, but keep the blue bar
-	// at its native source height instead of stretching it to font metrics.
-	highlight_height := max(0, rect.h - 8)
-	if textured do highlight_height = min(highlight_height, ui_context.theme.segmented_selection.source[1].h)
+	highlight_height := selection_height(ui_context, rect.h)
 	highlight_y := rect.y + (rect.h - highlight_height) * 0.5
-	if ui_context.theme.panel_skin.texture.handle != k2.TEXTURE_NONE {
-		draw_skin(ui_context, rect, ui_context.theme.panel_skin)
-	} else {
-		draw_rounded_rect(rect, ui_context.corner, ui_context.theme.widget_bg)
+	draw_surface(
+		ui_context,
+		rect,
+		ui_context.theme.panel_skin,
+		ui_context.corner,
+		ui_context.theme.widget_bg,
+	)
+	assert(int(selected^) < len(entries))
+	x := rect.x + segment_width * f32(selected^)
+	if ui_context.animation.widget == id {
+		x = lerp_float(
+			ui_context.animation.value_key0,
+			ui_context.animation.value_key1,
+			ease_out_back(ui_context.animation.t),
+		)
 	}
-	if int(selected^) < len(entries) {
-		x := rect.x + segment_width * f32(selected^)
-		if ui_context.animation.widget == id {
-			x = lerp_float(
-				ui_context.animation.value_key0,
-				ui_context.animation.value_key1,
-				ease_out_back(ui_context.animation.t),
-			)
-		}
-		highlight := Rect {
-			x + ui_context.padding,
-			highlight_y,
-			max(0, segment_width - 2 * ui_context.padding),
-			highlight_height,
-		}
-		if textured {
-			draw_three_slice(ui_context, highlight, ui_context.theme.segmented_selection)
-		} else {
-			draw_rounded_rect(highlight, ui_context.padding, ui_context.theme.accent)
-		}
+	highlight := Rect {
+		x + ui_context.padding,
+		highlight_y,
+		max(0, segment_width - 2 * ui_context.padding),
+		highlight_height,
 	}
+	draw_selection(ui_context, highlight)
 	for entry, i in entries {
 		hit := Rect{rect.x + f32(i) * segment_width, rect.y, segment_width, rect.h}
 		if is_mouse_in_rect(ui_context, hit) {
@@ -766,26 +679,13 @@ segmented :: proc(
 					max(0, segment_width - 2 * ui_context.padding),
 					highlight_height,
 				}
-				if textured {
-					draw_three_slice(
-						ui_context,
-						hover_rect,
-						ui_context.theme.segmented_selection,
-						{255, 255, 255, 100},
-					)
-				} else {
-					draw_rounded_rect(
-						hover_rect,
-						ui_context.padding,
-						ui_context.theme.widget_hover,
-					)
-				}
+				draw_selection(ui_context, hover_rect, hovered = true)
 			}
 		}
 		text_height := min(font_size, max(1, highlight_height - 4))
 		measured := k2.measure_text(entry, text_height)
 		available := max(0, segment_width - 2 * ui_context.padding - 8)
-		if measured.x > available && measured.x > 0 do text_height *= available / measured.x
+		if measured.x > available do text_height *= available / measured.x
 		if text_height > 0 do draw_text_align(ui_context, hit, entry, ui_context.theme.text, text_height)
 		if i > 0 do draw_rounded_rect({hit.x - 0.5, rect.y + 6, 1, max(0, rect.h - 12)}, 0, ui_context.theme.separator)
 	}
@@ -843,20 +743,16 @@ slider :: proc(
 
 	norm_value := (value^ - min_value) / (max_value - min_value)
 	thumb_x := norm_value * track_rect.w + track_rect.x
-	thumb_size := ui_context.font_height
-	textured_thumb := style.thumb.texture.handle != k2.TEXTURE_NONE
-	if textured_thumb do thumb_size = max(thumb_size, track_height + 10)
-	thumb_width := thumb_size
-	if textured_thumb {
-		source := style.thumb.source
-		if source.w == 0 && source.h == 0 do source = k2.get_texture_rect(style.thumb.texture)
-		if source.h > 0 do thumb_width = thumb_size * source.w / source.h
+	thumb_size := slider_thumb_size(ui_context, style, track_height)
+	half_size := thumb_size.y * 0.5
+	thumb_rect := Rect {
+		thumb_x - thumb_size.x * 0.5,
+		center_y - half_size,
+		thumb_size.x,
+		thumb_size.y,
 	}
-	half_size := thumb_size * 0.5
 
-	thumb_rect := Rect{thumb_x - thumb_width * 0.5, center_y - half_size, thumb_width, thumb_size}
-
-	track_hit_rect := Rect{track_rect.x, center_y - half_size, track_rect.w, thumb_size}
+	track_hit_rect := Rect{track_rect.x, center_y - half_size, track_rect.w, thumb_size.y}
 	track_hovered := is_mouse_in_rect(ui_context, track_hit_rect)
 	thumb_hovered := is_mouse_in_rect(ui_context, thumb_rect)
 
@@ -909,12 +805,13 @@ slider :: proc(
 		filled = bar_style_enabled(style),
 	)
 
-	if textured_thumb {
-		tint := Color{205, 215, 240, 255} if ui_context.dragging_object == id else k2.WHITE
-		draw_skin(ui_context, thumb_rect, style.thumb, tint)
-	} else {
-		draw_rounded_rect(thumb_rect, half_size, ui_context.theme.accent)
-	}
+	draw_round_thumb(
+		ui_context,
+		thumb_rect,
+		style.thumb,
+		ui_context.theme.accent,
+		ui_context.dragging_object == id,
+	)
 }
 
 progress_bar :: proc(
@@ -1065,7 +962,7 @@ clip_to_screen :: proc(rect: Rect, camera: Maybe(k2.Camera)) -> Rect {
 // Axis-aligned cameras preserve rectangular scissors exactly. Set between frames.
 set_camera :: proc(ui_context: ^UI_Context, camera: Maybe(k2.Camera)) {
 	assert(ui_context.clip_depth == 0)
-	if cam, ok := camera.?; ok do assert(cam.rotation == 0 && cam.zoom >= 0)
+	if cam, ok := camera.?; ok do assert(cam.rotation == 0 && cam.zoom > 0)
 	ui_context.camera = camera
 	k2.set_camera(camera)
 }

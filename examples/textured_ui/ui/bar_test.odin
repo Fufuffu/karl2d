@@ -1,3 +1,5 @@
+#+build !js
+
 package ui
 
 import "core:testing"
@@ -5,7 +7,7 @@ import k2 "../../.."
 
 @(test)
 three_slice_caps_fit_small_and_scaled_bars :: proc(t: ^testing.T) {
-    source := [3]Rect{{370,90,9,18},{356,368,18,18},{190,348,9,18}}
+    source := [3]Rect{{0,0,9,18},{9,0,18,18},{27,0,9,18}}
     testing.expect(t,three_slice_widths(source,100,18)==[3]f32{9,82,9})
     testing.expect(t,three_slice_widths(source,200,36)==[3]f32{18,164,18})
     testing.expect(t,three_slice_widths(source,18,18)==[3]f32{9,0,9})

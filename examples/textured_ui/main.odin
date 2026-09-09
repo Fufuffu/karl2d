@@ -36,18 +36,18 @@ Item :: struct {
 	category:     u32,
 }
 ITEMS := [?]Item {
-	{"Wayfarer's blade", "+8 attack / equipped", {335, 152, 34, 37}, 1},
-	{"Ember potion", "Restores 25 health", {370, 90, 9, 18}, 2},
-	{"Moonwater", "Restores 30 mana", {372, 294, 9, 18}, 2},
-	{"Old brass key", "Opens the watchtower", {338, 294, 34, 37}, 3},
-	{"Leather gloves", "+2 defense", {0, 482, 30, 30}, 1},
-	{"Silver gauntlet", "+5 defense", {60, 482, 30, 30}, 1},
-	{"Forest tonic", "Restores 25 health", {370, 108, 9, 18}, 2},
-	{"Guild seal", "Proof of membership", {335, 76, 35, 38}, 3},
-	{"Ranger's knife", "+4 attack", {338, 331, 34, 37}, 1},
-	{"Lucky coin", "A little extra luck", {369, 152, 17, 17}, 3},
-	{"Travel gloves", "Warm and well worn", {30, 482, 30, 30}, 1},
-	{"Sun elixir", "Restores 25 health", {370, 126, 9, 18}, 2},
+	{"Wayfarer's blade", "+8 attack / equipped", ATLAS_BLADE, 1},
+	{"Ember potion", "Restores 25 health", ATLAS_ORANGE_LEFT, 2},
+	{"Moonwater", "Restores 30 mana", ATLAS_BLUE_LEFT, 2},
+	{"Old brass key", "Opens the watchtower", ATLAS_KEY, 3},
+	{"Leather gloves", "+2 defense", ATLAS_LEATHER_GLOVES, 1},
+	{"Silver gauntlet", "+5 defense", ATLAS_SILVER_GAUNTLET, 1},
+	{"Forest tonic", "Restores 25 health", ATLAS_GREEN_POTION, 2},
+	{"Guild seal", "Proof of membership", ATLAS_SEAL, 3},
+	{"Ranger's knife", "+4 attack", ATLAS_KNIFE, 1},
+	{"Lucky coin", "A little extra luck", ATLAS_COIN, 3},
+	{"Travel gloves", "Warm and well worn", ATLAS_TRAVEL_GLOVES, 1},
+	{"Sun elixir", "Restores 25 health", ATLAS_YELLOW_POTION, 2},
 }
 PLACES := [?]string{"Hearthwick", "Whispering Wood", "Old Watchtower", "Moonlit Ruins"}
 POINTS := [?]k2.Vec2{{0.20, 0.70}, {0.43, 0.48}, {0.76, 0.61}, {0.66, 0.20}}
@@ -61,9 +61,6 @@ QUESTS := [?]string {
 	"A light at the tower",
 }
 
-skin :: proc(source: k2.Rect) -> ui.Skin {
-	return {texture = atlas, source = source, borders = {8, 8, 8, 8}, border_scale = 1}
-}
 label :: proc(rect: k2.Rect, value: string, size: f32 = 16, color := INK) {
 	ui.label(ctx, rect, value, font_size = size, color = color, hor_align = .Left)
 }
@@ -80,7 +77,15 @@ button :: proc(rect: k2.Rect, value: string) -> bool {
 	return clicked
 }
 
+frames: int
+
 main :: proc() {
+	init()
+	defer shutdown()
+	for step() {}
+}
+
+init :: proc() {
 	k2.init(
 		#config(UI_WIDTH, 1280),
 		#config(UI_HEIGHT, 800),
@@ -90,118 +95,72 @@ main :: proc() {
 	ctx = ui.init(6, 8)
 	atlas = k2.load_texture_from_bytes(#load("assets/uipack_rpg_sheet.png"))
 	portrait = k2.load_texture_from_bytes(#load("assets/portrait.png"))
-	defer k2.shutdown()
-	defer k2.destroy_texture(atlas)
-	defer k2.destroy_texture(portrait)
-	defer ui.destroy(ctx)
-	ctx.theme.window_skin = skin({0, 376, 100, 100})
-	ctx.theme.panel_skin = skin({200, 294, 93, 94})
-	ctx.theme.button_skin = skin({0, 188, 190, 49})
-	track := ui.Three_Slice {
-		texture = atlas,
-		source  = {{372, 330, 9, 18}, {338, 386, 18, 18}, {190, 294, 9, 18}},
+	init_theme()
+	frames = 0
+}
+
+step :: proc() -> bool {
+	if !k2.update() do return false
+	size := k2.get_screen_size()
+	if size.x <= 0 || size.y <= 0 do return true
+	camera := k2.Camera {
+		target = DESIGN * 0.5,
+		offset = size * 0.5,
+		zoom   = min(size.x / DESIGN.x, size.y / DESIGN.y),
 	}
-	health_bar = {
-		track = track,
-		fill = {
-			texture = atlas,
-			source = {{370, 90, 9, 18}, {356, 368, 18, 18}, {190, 348, 9, 18}},
-		},
-		height = 18,
-	}
-	mana_bar = {
-		track = track,
-		fill = {
-			texture = atlas,
-			source = {{372, 294, 9, 18}, {356, 431, 18, 18}, {372, 312, 9, 18}},
-		},
-		height = 18,
-	}
-	// One atlas material for all blue fills, including selector highlights.
-	ctx.theme.progress_bar = mana_bar
-	ctx.theme.toggle_bar = mana_bar
-	ctx.theme.segmented_selection = mana_bar.fill
-	ctx.theme.slider_bar = mana_bar
-	ctx.theme.slider_bar.thumb = {
-		texture = atlas,
-		source  = {335, 38, 35, 38},
-	}
-	ctx.theme.toggle_thumb_skin = ctx.theme.slider_bar.thumb
-	// The lower corner starts at source row 40; keep it and the button's
-	// drop shadow inside the fixed cap, with one flat row before the curve.
-	ctx.theme.scrollbar_thumb_skin = {
-		texture = atlas,
-		source  = {290, 0, 45, 49},
-		borders = {4, 4, 4, 10},
-	}
-	ctx.theme.scrollbar_track = {167, 143, 98, 255}
-	ctx.theme.scrollbar_thumb = {165, 180, 205, 255}
-	ctx.theme.scrollbar_hover = {205, 215, 240, 255}
-	ctx.theme.scrollbar_active = {145, 165, 200, 255}
-	ctx.theme.text = INK
-	ctx.theme.title_text = CREAM
-	ctx.theme.title_bg = {101, 76, 49, 255}
-	ctx.theme.widget_bg = {173, 151, 105, 255}
-	ctx.theme.widget_hover = {207, 195, 167, 255}
-	ctx.theme.widget_active = GOLD
-	ctx.theme.accent = {45, 175, 218, 255} // shared blue for selections, progress, and active toggles
-	ctx.theme.separator = {88, 71, 45, 110}
-	frames := 0
-	for k2.update() {
-		size := k2.get_screen_size()
-		if size.x <= 0 || size.y <= 0 do continue
-		camera := k2.Camera {
-			target = DESIGN * 0.5,
-			offset = size * 0.5,
-			zoom   = min(size.x / DESIGN.x, size.y / DESIGN.y),
-		}
-		ui.set_camera(ctx, camera)
-		ui.update_mouse_screen_pos(ctx, k2.get_mouse_position())
-		ui.update_scroll_delta(ctx, k2.get_mouse_wheel_delta())
-		if k2.mouse_button_went_down(.Left) do ui.update_mouse_button(ctx, .Pressed)
-		else if k2.mouse_button_went_up(.Left) do ui.update_mouse_button(ctx, .Released)
-		dt := min(k2.get_frame_time(), 0.1)
-		if travelling && !settings_open {
-			travel = min(100, travel + dt * pace * (9 + f32(stance) * 3))
-			if travel >= 100 {
-				travelling = false
-				completed += 1
-				health = max(5, health - 8 - f32(stance) * 4)
-				mana = max(0, mana - 6)
-				if auto_collect do coins += 25
-				notice = "Destination reached! Journal updated. Rest or explore again."
-			}
-		}
-		when #config(UI_SMOKE_TEST, false) do smoke_input(frames, camera)
-		ui.begin_frame(ctx, dt)
-		k2.clear({31, 48, 51, 255})
-		// A modal owns all input, even outside its bounds. Underlying windows
-		// still draw and retain button order but cannot react to this gesture.
-		mouse, state, down, wheel :=
-			ctx.mouse_pos, ctx.mouse_button, ctx.mouse_down, ctx.scroll_delta
-		if settings_open {
-			ctx.mouse_pos = {-10000, -10000}
-			ctx.mouse_button = .Idle
-			ctx.mouse_down = false
-			ctx.scroll_delta = 0
-		}
-		draw_game()
-		ctx.mouse_pos, ctx.mouse_button, ctx.mouse_down, ctx.scroll_delta =
-			mouse, state, down, wheel
-		if settings_open {
-			k2.draw_rect({0, 0, DESIGN.x, DESIGN.y}, {12, 21, 24, 170})
-			draw_settings()
-		}
-		ui.end_frame(ctx)
-		ui.set_camera(ctx, nil)
-		k2.present()
-		free_all(context.temp_allocator)
-		when #config(UI_SMOKE_TEST, false) {
-			smoke_verify(frames)
-			frames += 1
-			if frames == 23 do break
+	ui.set_camera(ctx, camera)
+	ui.update_mouse_screen_pos(ctx, k2.get_mouse_position())
+	ui.update_scroll_delta(ctx, k2.get_mouse_wheel_delta())
+	if k2.mouse_button_went_down(.Left) do ui.update_mouse_button(ctx, .Pressed)
+	else if k2.mouse_button_went_up(.Left) do ui.update_mouse_button(ctx, .Released)
+	dt := min(k2.get_frame_time(), 0.1)
+	if travelling && !settings_open {
+		travel = min(100, travel + dt * pace * (9 + f32(stance) * 3))
+		if travel >= 100 {
+			travelling = false
+			completed += 1
+			health = max(5, health - 8 - f32(stance) * 4)
+			mana = max(0, mana - 6)
+			if auto_collect do coins += 25
+			notice = "Destination reached! Journal updated. Rest or explore again."
 		}
 	}
+	when #config(UI_SMOKE_TEST, false) do smoke_input(frames)
+	ui.begin_frame(ctx, dt)
+	k2.clear({31, 48, 51, 255})
+	// Block game input while the modal is open.
+	mouse, state, down, wheel :=
+		ctx.mouse_pos, ctx.mouse_button, ctx.mouse_down, ctx.scroll_delta
+	if settings_open {
+		ctx.mouse_pos = {-10000, -10000}
+		ctx.mouse_button = .Idle
+		ctx.mouse_down = false
+		ctx.scroll_delta = 0
+	}
+	draw_game()
+	ctx.mouse_pos, ctx.mouse_button, ctx.mouse_down, ctx.scroll_delta =
+		mouse, state, down, wheel
+	if settings_open {
+		k2.draw_rect({0, 0, DESIGN.x, DESIGN.y}, {12, 21, 24, 170})
+		draw_settings()
+	}
+	ui.end_frame(ctx)
+	ui.set_camera(ctx, nil)
+	k2.present()
+	free_all(context.temp_allocator)
+	when #config(UI_SMOKE_TEST, false) {
+		smoke_verify(frames)
+		frames += 1
+		if frames == 23 do return false
+	}
+	return true
+}
+
+shutdown :: proc() {
+	ui.destroy(ctx)
+	k2.destroy_texture(portrait)
+	k2.destroy_texture(atlas)
+	k2.shutdown()
 	when #config(UI_SMOKE_TEST, false) {
 		assert(frames == 23)
 		fmt.println(
@@ -211,8 +170,7 @@ main :: proc() {
 }
 
 draw_game :: proc() {
-	// The HUD demonstrates a pinned, undecorated, borderless window with no
-	// padding. Its transparent background lets the scene color show through.
+	// The HUD uses the scene background.
 	window_skin, window_bg := ctx.theme.window_skin, ctx.theme.window_bg
 	ctx.theme.window_skin, ctx.theme.window_bg = {}, {0, 0, 0, 0}
 	ui.begin_window(
@@ -267,12 +225,13 @@ draw_backpack :: proc() {
 	count := 0
 	for item in ITEMS do if category == 0 || item.category == category do count += 1
 	backpack_scroll.content_height = f32(count) * 62
+	when #config(UI_SMOKE_TEST, false) do backpack_viewport = viewport
 	list := ui.begin_scroll(ctx, viewport, &backpack_scroll)
 	for item, i in ITEMS {
 		if category != 0 && item.category != category do continue
 		item_rect := row(&list, 56, 6)
 		if ui.is_mouse_in_rect(ctx, item_rect) && ctx.mouse_button == .Pressed do selected_item = i
-		if selected_item == i do ui.draw_skin(ctx, item_rect, skin({190, 100, 100, 100}))
+		if selected_item == i do ui.draw_skin(ctx, item_rect, skin(ATLAS_CARD))
 		icon_rect := ui.cut_left(&item_rect, 40)
 		ui.image_region(ctx, {icon_rect.x + 7, icon_rect.y + 9, 26, 30}, atlas, item.icon)
 		label({item_rect.x + 4, item_rect.y + 3, item_rect.w - 8, 24}, item.name, 14)
@@ -365,7 +324,7 @@ draw_map :: proc(rect: k2.Rect) {
 				ctx,
 				{pos.x - 12, pos.y - 49 + pulse, 24, 25},
 				atlas,
-				{171, 486, 22, 21},
+				ATLAS_WAYPOINT,
 			)
 		}
 	}
@@ -386,9 +345,10 @@ draw_journal :: proc() {
 	viewport := ui.panel(ctx, content, 10)
 	defer ui.panel_end(ctx)
 	journal_scroll.content_height = f32(len(QUESTS)) * 142
+	when #config(UI_SMOKE_TEST, false) do journal_viewport = viewport
 	list := ui.begin_scroll(ctx, viewport, &journal_scroll)
 	for quest, i in QUESTS {
-		card := ui.panel(ctx, row(&list, 132, 10), 10, skin({190, 100, 100, 100}))
+		card := ui.panel(ctx, row(&list, 132, 10), 10, skin(ATLAS_CARD))
 		label(row(&card, 25), quest, 16)
 		label(row(&card, 21), "Complete" if i < completed else "Guild commission", 13)
 		label(row(&card, 20), "Explore a waypoint. Return safely.", 12)
@@ -408,6 +368,7 @@ draw_settings :: proc() {
 	ui.cut_bottom(&content, 10)
 	viewport := ui.panel(ctx, content, 12)
 	settings_scroll.content_height = 678
+	when #config(UI_SMOKE_TEST, false) do settings_viewport = viewport
 	list := ui.begin_scroll(ctx, viewport, &settings_scroll)
 	label(row(&list, 28), "Make the road your own", 22)
 	label(row(&list, 24), "Expedition paused while you are in camp.", 14)
@@ -446,113 +407,4 @@ draw_settings :: proc() {
 		stance = 0
 	}
 	if button(footer, "Back to adventure") do settings_open = false
-}
-
-// Deterministic integration smoke: camera transforms, independent scroll views,
-// modal input capture, toggles, map selection, travel, and window manipulation.
-smoke_input :: proc(frame: int, camera: k2.Camera) {
-	assert(ctx.slice_shader_ok)
-	point := k2.Vec2{137, 241}
-	roundtrip := k2.screen_to_camera(k2.camera_to_screen(point, camera), camera)
-	assert(abs(roundtrip.x - point.x) < 0.01 && abs(roundtrip.y - point.y) < 0.01)
-	clip := ui.clip_to_screen({20, 30, 100, 80}, camera)
-	assert(abs(clip.w - 100 * camera.zoom) < 0.01 && abs(clip.h - 80 * camera.zoom) < 0.01)
-	ctx.mouse_button = .Idle
-	ctx.mouse_down = false
-	ctx.mouse_pos = {-10000, -10000}
-	ctx.scroll_delta = 0
-	switch frame {
-	case 1:
-		ctx.mouse_pos = {1100, 280}; ctx.scroll_delta = -3
-	case 2:
-		ctx.mouse_pos = {160, 490}; ctx.scroll_delta = -3
-	case 3:
-		settings_open = true
-	case 4:
-		ctx.mouse_pos = {600, 380}; ctx.scroll_delta = -3
-	case 5:
-		// A modal blocks clicks on the expedition button.
-		ctx.mouse_pos = {480, 650}; ctx.mouse_button = .Pressed
-	case 6:
-		settings_scroll.offset_y = 0
-	case 7:
-		ctx.mouse_pos = {650, 195}; ui.update_mouse_button(ctx, .Pressed)
-	case 8:
-		ctx.mouse_pos = {680, 215}; ctx.mouse_down = true
-	case 9:
-		ui.update_mouse_button(ctx, .Released)
-	case 10:
-		ctx.mouse_pos = {
-			settings_rect.x + settings_rect.w - 2,
-			settings_rect.y + settings_rect.h - 2,
-		}
-		ui.update_mouse_button(ctx, .Pressed)
-	case 11:
-		ctx.mouse_pos = {
-			settings_rect.x + settings_rect.w + 30,
-			settings_rect.y + settings_rect.h + 20,
-		}
-		ctx.mouse_down = true
-	case 12:
-		ui.update_mouse_button(ctx, .Released)
-	case 13:
-		settings_open = false
-	case 14:
-		ctx.mouse_pos = {map_control.x + 18, map_control.y + 18}
-		ui.update_mouse_button(ctx, .Pressed)
-	case 15:
-		ctx.animation = {}
-		ctx.mouse_pos = {
-			travel_control.x + 20,
-			travel_control.y + 20,
-		}; ui.update_mouse_button(ctx, .Pressed)
-	case 16:
-		settings_open = true
-	case 17:
-		ctx.mouse_pos = {
-			collect_control.x + collect_control.w - ctx.padding - ctx.font_height,
-			collect_control.y + ctx.padding + ctx.font_height * 0.5,
-		}
-		ui.update_mouse_button(ctx, .Pressed)
-	case 18:
-		ui.update_mouse_button(ctx, .Released)
-	case 19:
-		ctx.animation = {}
-		ctx.mouse_pos = {
-			speed_control.x + speed_control.w * 0.85,
-			speed_control.y + ctx.row_height * 1.5 + ctx.padding,
-		}
-		ui.update_mouse_button(ctx, .Pressed)
-	case 20:
-		ctx.animation.t = 1
-	case 21:
-		ui.update_mouse_button(ctx, .Released)
-	case 22:
-		settings_open = false
-	}
-}
-smoke_verify :: proc(frame: int) {
-	assert(ctx.clip_depth == 0 && ctx.panel_depth == 0 && ctx.current_window == nil)
-	switch frame {
-	case 1:
-		assert(journal_scroll.offset_y > 0 && backpack_scroll.offset_y == 0)
-	case 2:
-		assert(backpack_scroll.offset_y > 0)
-	case 4:
-		assert(settings_scroll.offset_y > 0)
-	case 5:
-		assert(!travelling)
-	case 8:
-		assert(settings_rect.x > 410 && settings_rect.y > 180)
-	case 11:
-		assert(settings_rect.w > 460 && settings_rect.h > 430)
-	case 14:
-		assert(selected_place == 3)
-	case 15:
-		assert(travelling)
-	case 17:
-		assert(!auto_collect)
-	case 20:
-		assert(pace > 1)
-	}
 }
