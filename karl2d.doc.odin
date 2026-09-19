@@ -15,15 +15,16 @@ package karl2d
 //
 // Karl2D will use `allocator` for all dynamically allocated memory that is needed more than one
 // frame. For single frame allocations the library uses an internal "frame allocator".
+// The frame allocator is cleared when `update()` runs.
 //
 // Call `init` before using Karl2D procedures that depend on runtime state, such as window,
 // drawing, input, audio, texture, font and shader procedures. Pure helper procedures, types and
 // constants can be used before `init`.
 //
 // The return value is a pointer to Karl2D's internal state. You can restore this state later using
-// `set_internal_state()`. This is useful for example when doing game code reload, as the state may
-// get reset when the library is reloaded. You can safely ignore the return value if you have no
-// such needs.
+// `set_internal_state()`. This is useful when doing hot reload, as the internal state pointer gets
+// reset when the library is reloaded. You can safely ignore the return value if you have no such
+// needs.
 //
 // THREAD INFO: The value of `audio_thread_logger` will be stored for later use by the audio thread.
 // Make sure your logger is thread safe (the file/console loggers in Odin are).
@@ -52,8 +53,8 @@ init :: proc(
 //// for {
 ////     k2.reset_frame_allocator()
 ////     k2.calculate_frame_time()
-////     k2.process_events()
 ////     k2.update_audio()
+////     k2.process_events()
 ////     
 ////     k2.clear(k2.BLUE)
 ////     k2.present()
@@ -64,8 +65,8 @@ init :: proc(
 //// }
 update :: proc() -> bool
 
-// Returns true the user has pressed the close button on the window, or used a key stroke such as
-// ALT+F4 on Windows. The application can decide if it wants to shut down or if it wants to show
+// Returns `true` if the user has pressed the close button on the window, or used a key stroke such
+// as ALT+F4 on Windows. The application can decide if it wants to shut down or if it wants to show
 // some kind of confirmation dialogue.
 //
 // Called by `update`, but can be called manually if you need more control.
@@ -85,14 +86,14 @@ clear :: proc(color: Color)
 // Called as part of `update`, but can be called manually if you need more control.
 reset_frame_allocator :: proc()
 
-// Calculates how long the previous frame took and how it has been since the application started.
-// You can fetch the calculated values using `get_frame_time` and `get_time`.
+// Calculates how long the previous frame took and how long it has been since the application
+// started. You can fetch the calculated values using `get_frame_time` and `get_time`.
 //
 // Called as part of `update`, but can be called manually if you need more control.
 calculate_frame_time :: proc()
 
-// Present the drawn stuff to the player. Also known as "flipping the backbuffer": Call at end of
-// frame to make everything you've drawn appear on the screen.
+// Present the graphics drawn on the screen to the player. Also known as "flipping the backbuffer":
+// Call at end of frame to make everything you've drawn appear on the screen.
 //
 // When you draw using for example `draw_texture`, then that stuff is drawn to an invisible texture
 // called a "backbuffer". This makes sure that we don't see half-drawn frames. So when you are happy
@@ -116,9 +117,6 @@ process_events :: proc()
 //
 // Note: Gamepad axis movement (analogue sticks and analogue triggers) are _not_ events. Those can
 // only be queried using `k2.get_gamepad_axis`.
-//
-// Note: These are the events the platform reported. The touch that `set_touch_events_from_mouse`
-// makes from the mouse is not one of them, it only shows up in `get_touches`.
 //
 // Warning: The returned slice is only valid during the current frame! You can make a clone of it
 // using the `slice.clone` procedure (import `core:slice`).
@@ -172,14 +170,14 @@ get_window_scale :: proc() -> f32
 // Use to change between windowed mode, resizable windowed mode and fullscreen
 set_window_mode :: proc(window_mode: Window_Mode)
 
-// Sets the icon shown in the titlebar and the OS's program switcher bar. By default Karl2D uses an
-// icon that says K2. Load the image using for example `k2.load_image_from_file`.
+// Sets the icon shown in the titlebar and the OS's program switcher bar. Load the image using for
+// example `k2.load_image_from_file`.
 //
 // The data of `image` is copied, so you can destroy it after running this.
 //
 // On web this modifies the icon shown on the tab.
 //
-// Returns `true` if the icon was set. The reason is logged when it wasn't.
+// Returns `true` if the icon was set.
 set_window_icon :: proc(image: Image) -> bool
 
 // Flushes the current batch. A batch consists of a number of draw calls and a vertex buffer. This
@@ -187,9 +185,6 @@ set_window_icon :: proc(image: Image) -> bool
 // call this procedure manually. It is done automatically when `present` or `clear` run. It can also
 // happen when you destroy a resource such as a texture or shader that is used in the current
 // batch.
-//
-// Note that `set_z` never starts a new draw call: the z value is stored in each vertex rather than
-// being part of a draw call's settings, so it's fine to call it before every draw.
 //
 // All the draw calls of a batch share a vertex buffer of VERTEX_BUFFER_MAX bytes. The shader
 // dictates how big a vertex is. The maximum number of vertices in a batch is therefore
@@ -216,43 +211,39 @@ key_went_up :: proc(key: Keyboard_Key) -> bool
 key_is_held :: proc(key: Keyboard_Key) -> bool
 
 // Returns all the Unicode code points that were typed since the last frame, taking the current
-// keyboard layout into account. This is what you want for text input, as opposed to
-// `key_went_down`, which tells you about physical keys rather than the characters they produce.
-//
-// Control characters (Backspace, Enter, Tab, etc) and presses of modifier keys on their own are
-// never included.
+// keyboard layout into account. Commonly used for text input fields.
 //
 // Warning: The returned slice is only valid during the current frame! You can make a clone of it
 // using the `slice.clone` procedure (import `core:slice`).
 get_typed_runes :: proc() -> []rune
 
-// Returns all touches that were active at any point during this frame, including those that ended
-// this frame (those have `went_up` set).
+// Returns all touches that were active during this frame. Touches that ended this frame are also
+// included: They have `went_up` set to `true`.
 //
-// Note: Only web reports touches from a real touch screen. On desktop the only touches you get are
-// the ones `set_touch_events_from_mouse` makes from the mouse.
+// Note: The order of touches may vary from frame to frame. Use the `id` of a touch to identify it
+// between frames.
 //
-// Note: The order is not stable. When a touch ends, the last one in the list takes its place, so
-// match touches by `id` between frames rather than by where they sit in the slice.
+// By default, touches cause left mouse button events to happen as well. This way, many mouse-
+// controlled desktop games work on touch as well. Control that behavior using
+// `set_mouse_touch_emulation`.
 //
 // Warning: The returned slice is only valid during the current frame!
 get_touches :: proc() -> []Touch
 
-// Enabled by default. Holding the left mouse button produces a touch (with id `EMULATED_TOUCH_ID`),
-// so code written for touch also works with a mouse. Turn it off if you handle the mouse yourself,
-// otherwise one drag arrives as both.
+// Controls if touches should cause mouse events, or if mouse events should cause touche events. Or
+// if none of these things should happen. `k2.init` sets this to `.Touch_To_Mouse` by default so
+// that desktop games have rudimentary functionality on touch screens.
 //
-// The touch is built from the mouse state, so it never shows up in `get_events`, only in
-// `get_touches`.
-set_touch_events_from_mouse :: proc(enabled: bool)
+// If your handles both touch and mouse input, then you want this set to `.None`.
+set_mouse_touch_emulation :: proc(emulation: Mouse_Touch_Emulation)
 
 // Returns which modifiers are held. The possible values are `Control`, `Alt`, `Shift` and `Super`.
 // You can check that an exact set of modifiers are held like so:
 //
 // `if k2.get_held_modifiers() == { .Control, Shift} {}`
 //
-// This will only be true if left/right control are held and left/right shift are held, but it also
-// makes sure that no alt or super (windows) key are held.
+// The above will only be true if left/right control are held and left/right shift are held. It will
+// return false if any of the alt or super keys are held.
 //
 // This is useful for checking for held modifiers for hotkeys in user interfaces. If you want to
 // associate an in-game action with a specific key such as Left Control, then it's better to just do
@@ -560,8 +551,9 @@ destroy_image :: proc(img: Image)
 get_texture_rect :: proc(t: Texture) -> Rect
 
 // Update a texture with new pixels. `bytes` is the new pixel data. `rect` is the rectangle in
-// `tex` where the new pixels should end up.
-update_texture :: proc(tex: Texture, bytes: []u8, rect: Rect) -> bool
+// `tex` where the new pixels should end up. `pitch` is the number of bytes between the start of two
+// rows, the default of `0` means that the rows are tightly packed.
+update_texture :: proc(tex: Texture, bytes: []u8, rect: Rect, pitch := 0) -> bool
 
 // Destroy a texture, freeing up any memory it has used on the GPU.
 destroy_texture :: proc(tex: Texture)
@@ -916,6 +908,16 @@ rect_cut_left :: proc(r: ^Rect, w: f32, m: f32) -> Rect
 // `m` is the margin added to the right of the cut part.
 rect_cut_right :: proc(r: ^Rect, w: f32, m: f32) -> Rect
 
+// TODO: Add _right, _top, _bottom variations
+//
+// Split `r` in half horizontally. Split at position `x`, offest by margin `m`. Returns the left and
+// right result of the split.
+rect_split_left :: proc(
+	r: Rect,
+	x: f32,
+	m: f32,
+) -> (left: Rect, right: Rect)
+
 // Rotate 2D vector `v` by `angle_radians` radians around the origin (0, 0).
 //
 // If you need to rotate around a point that is not the origin, then you can first subtract the
@@ -1055,6 +1057,13 @@ set_shader :: proc(shader: Maybe(Shader))
 // Set the value of a constant (also known as uniform in OpenGL). Look up shader constant locations
 // (the kind of value needed for `loc`) by running `loc := shader.constant_lookup["constant_name"]`.
 set_shader_constant :: proc(shd: Shader, loc: Shader_Constant_Location, val: any)
+
+// Set a shader to use a specific texture. Look up the bindpoint using the `texture_lookup` field
+// inside the `Shader` object.
+//
+// You don't need to call this when drawing normal textures, it's for advanced usage where you have
+// multiple textures as inputs to a shader.
+set_shader_texture :: proc(shd: Shader, bindpoint: int, texture: Texture)
 
 // Sets the value of a shader input (also known as a shader attribute). There are three default
 // shader inputs known as position, texcoord and color. If you have shader with additional inputs,
@@ -1424,8 +1433,8 @@ Shader :: struct {
 
 	texture_bindpoints: []Texture_Handle,
 
-	// Used to lookup bindpoints of textures. You can then set the texture by overriding
-	// `shader.texture_bindpoints[shader.texture_lookup["some_tex"]] = some_texture.handle`
+	// Used to lookup bindpoints of textures. You can then set the texture by calling
+	// `set_shader_texture and supplying it with the bindpoint you looked up.
 	texture_lookup: map[string]int,
 	default_texture_index: Maybe(int),
 
@@ -1493,14 +1502,20 @@ Font_Options :: struct {
 	// This is useful if you want to use `set_blend_mode(.Premultiplied_Alpha)` when drawing text.
 	premultiply_alpha: bool,
 
-	// Passed on to font atlas creation.
+	// The texture filter to use when drawing text using this font.
 	filter: Texture_Filter,
+
+	// Font formats like .ttc can contain multiple fonts. Use this parameter to pick one. For fonts
+	// that only contain a single font, leave this at zero.
+	font_index: int,
 }
 
 // Supported font types:
 // - Static: A pre-baked font where you specify a range of characters that are baked into a texture.
-// - Dynamic: A font where an atlas is continuously updated as you need need new characters. This
-//            mode current uses fontstash.
+// - Dynamic: A font that is continuously updated as you need new characters. All fonts share an
+//            atlas that can grow to a maximum size of 4096x4096. If it hits the maximum size, then
+//            it is compacted, at which point 50% of the glyphs are thrown out. The thrown out ones
+//            are the least recently used ones.
 //
 // Future types (TODO):
 // - Slug: Upload the character bezier curves to the GPU and render the text on the GPU without the
@@ -1512,19 +1527,19 @@ Font_Type :: enum {
 }
 
 Font_Data :: struct {
-	atlas: Texture,
 	options: Font_Options,
 
 	type: Font_Type,
 
 	// type == .Static
+	static_atlas: Texture,
 	static_glyphs: []Font_Baked_Glyph,
 	static_glyph_ranges: []Font_Baked_Glyph_Range,
 	static_font_size: f32,
 	static_line_spacing: f32,
 
 	// type == .Dynamic
-	dynamic_fontstash_handle: int,
+	dynamic_font: fc.Font,
 }
 
 Handle :: hm.Handle64
@@ -1642,22 +1657,22 @@ Audio_Stream_Seek_State :: enum {
 // From stb_vorbis.odin "In my test files the maximal-size usage is ~150KB.)"
 VORBIS_STATE_SIZE :: 300 * mem.Kilobyte
 
-// Tracks where the audio stream has written samples and where in the file it is decoding from.
 Audio_Stream_Cursor :: struct {
-	// Where in the audio clip referred to by `Audio_Stream_Data.clip` that we have most recently
-	// written samples. Together with the `offset` of the Sound_Object, this forms a circular buffer
+	// Where in `Audio_Stream_Data.buffer` we have most recently written samples. Together with
+	// `Sound_Object.offset`, this forms a circular buffer. This field is the 'head' and the offset
+	// is the 'tail'.
 	buffer_write_pos: int,
 
-	// Where in the file we most recently fetched samples from. For stereo, left and right count as
-	// one sample each.
+	// Where in the streamed source we most recently fetched samples from. For stereo, left and
+	// right count as one sample each.
 	decode_cursor: int,
 
 	// Used for discarding unwanted samples at the decode cursor. This exists because the vorbis
 	// pushdata API can't position the decoding exactly. When seeking we land the decoder at or
 	// before the wanted spot and store how many samples to skip from there.
 	//
-	// Also used for short seeks forward, which don't move the file at all and just decode past
-	// the samples in between.
+	// Also used for short forward seeks, which don't move the file at all and just decode past the
+	// samples in between.
 	seek_discard: int,
 }
 
@@ -1667,7 +1682,7 @@ Audio_Stream_Data :: struct {
 	vorbis: ^stbv.vorbis,
 	vorbis_buffer: stbv.vorbis_alloc,
 	sound: Sound,
-	clip: Audio_Clip,
+	buffer: Audio_Buffer,
 
 	cursor: Audio_Stream_Cursor,
 
@@ -1709,22 +1724,32 @@ Raw_Audio_Format :: enum {
 	Float64,
 }
 
+// An Audio_Buffer is the internal type used for any kind of audio data that is loaded into memory.
+// Both Audio_Clips and Audio_Streams use this to store the samples to be played.
+Audio_Buffer :: distinct Handle
+
+AUDIO_BUFFER_NONE :: Audio_Buffer {}
+
 // A piece of audio that has been completely loaded into memory. Play it using `play_audio_clip`.
-// Several sounds can play the same clip at the same time.
-Audio_Clip :: distinct Handle
+//
+// This is actually just an `Audio_Buffer`, but under a distinct name that is given special
+// treatment. When `play_audio_clip` runs, then a `Sound` is created. The `Sound` tracks where in
+// the `Audio_Clip` it is playing audio from. That way, many `Sound` instances can play audio from
+// the same `Audio_Clip` data.
+Audio_Clip :: distinct Audio_Buffer
 
 AUDIO_CLIP_NONE :: Audio_Clip{}
 
-Audio_Clip_Object :: struct {
-	handle: Audio_Clip,
+Audio_Buffer_Object :: struct {
+	handle: Audio_Buffer,
 
-	// All the samples of the audio clip. In the case of stereo, the left and right samples are
+	// The audio samples the buffer contains. In the case of stereo, the left and right samples are
 	// interleaved.
 	samples: []Audio_Sample,
 
 	// The number of samples per second. Note that the mixer uses 44100 samples per second (as
-	// defined by AUDIO_MIX_SAMPLE_RATE). When the sample rate of the buffer and the mixer do no
-	// match, then interpolation will happen during mixing.
+	// defined by AUDIO_MIX_SAMPLE_RATE). When the sample rate of the buffer and the mixer mismatch,
+	// interpolation will happen during mixing.
 	sample_rate: int,
 
 	// If this is Stereo, then the left and right samples are interleaved in `samples`.
@@ -1737,22 +1762,30 @@ Sound_Settings :: struct {
 	pitch: f32,
 }
 
-// What `Sound` handles are mapped to: something that is currently playing in the mixer. It holds
-// the clip it plays and the settings it plays with.
+// A `Sound_Object` is what `Sound` handles map to. It represents something currently playing in
+// the mixer. It holds a `buffer` which is where the mixer reads audio samples from. How that buffer
+// gets refilled depends on the `source` field. The source can either be an Audio_Clip or an
+// Audio_Stream. For clips `buffer` is the same as the clip's buffer. For audio streams the
+// buffer is a small amount of memory that is continuously being filled with data from the audio
+// stream.
 Sound_Object :: struct {
 	handle: Sound,
-	clip: Audio_Clip,
+	buffer: Audio_Buffer,
 	target_settings: Sound_Settings,
 	current_settings: Sound_Settings,
 
-	// How many samples have played?
+	// Where in `buffer` should we play samples from next?
 	offset: int,
 
 	// Only used when playing sounds that have pitch != 1 or when the sound has a sample rate that
 	// does not match the mixer's sample rate. In those cases we may get "fractional samples"
-	// because we may be in samples that are inbetween two samples in the original sound.
+	// because we may be in samples that are in-between two samples in the original sound.
 	offset_fraction: f32,
 
+	// If source is Audio_Clip: Set this flag using `set_sound_loop`.
+	// If source is Audio_Stream: Always true (the stream has its own loop flag internally and just
+	// refills the buffer with data, which continuously plays it). `set_sound_loop` will set the
+	// loop flag inside the Audio_Stream source data.
 	loop: bool,
 
 	// Set using `set_sound_paused`. The mixer skips paused sounds.
@@ -1769,15 +1802,18 @@ Sound_Object :: struct {
 	// playback position and then fade in again. This avoids clicks when seeking.
 	//
 	// For Audio_Stream-based sounds, the seeking state is inside Audio_Stream_Data.
-	has_pending_seek: bool,
-	pending_seek_seconds: f32,
+	clip_has_pending_seek: bool,
+	clip_pending_seek_seconds: f32,
 
 	// The bus this is mixed into. The zero value is the master bus.
 	bus: Audio_Bus,
 
-	// Set when this sound plays an audio stream. Zero for sounds played from a clip. Used by
-	// `set_sound_loop` to redirect to the stream's own loop flag.
-	stream: Audio_Stream,
+	// This is the Audio_Clip or Audio_Stream that was passed to either `play_audio_clip` or
+	// `play_audio_stream`, whichever was used to create this Sound.
+	source: union #no_nil {
+		Audio_Clip,
+		Audio_Stream,
+	},
 }
 
 // A bus is a group of sounds that are mixed together before they reach the master bus. You can set
@@ -1836,8 +1872,6 @@ State :: struct {
 	render_backend: Render_Backend_Interface,
 	render_backend_state: rawptr,
 
-	fs: fs.FontContext,
-	
 	close_window_requested: bool,
 
 	// All events for this frame. Cleared when `process_events` run
@@ -1861,8 +1895,10 @@ State :: struct {
 
 	touches: [dynamic; MAX_TOUCHES]Touch,
 
-	// See `set_touch_events_from_mouse`.
-	touch_events_from_mouse: bool,
+	// See `set_mouse_touch_emulation`.
+	mouse_touch_emulation: Mouse_Touch_Emulation,
+
+	touch_to_mouse_id: Touch_Id,
 
 	gamepad_button_went_down: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
 	gamepad_button_went_up: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
@@ -1870,10 +1906,14 @@ State :: struct {
 
 	// Also see FONT_NONE and FONT_DEFAULT
 	fonts: [dynamic]Font_Data,
+	font_cache: fc.Cache,
+	font_atlas_texture: Texture,
+	font_atlas_filter: Texture_Filter,
 	shape_drawing_texture: Texture_Handle,
-	// The settings the next draw call will be recorded with. Changing one of these does not affect
-	// draw calls that are already recorded.
-	current_font: Font,
+
+	// These `current_` are set when procs like `set_shader` etc run. When you draw more stuff, then
+	// they are compared against what `current_draw_call` says. If there is a difference, then a new
+	// draw call is set up.
 	current_camera: Maybe(Camera),
 	current_shader: Shader,
 	current_scissor: Maybe(Rect),
@@ -1896,14 +1936,15 @@ State :: struct {
 	batch_arena: runtime.Arena,
 	batch_allocator: runtime.Allocator,
 
-	// Says that the shader constants may differ from what the open draw call captured.
-	current_constants_dirty: bool,
+	// Tells you which things that have changed since the current draw call was created. For example
+	// if you use `set_shader` then the `.Shader` bit will be set. This information will be provided
+	// to the rendering backend, so it knows what state to update.
+	draw_call_changes: bit_set[Draw_Call_Change],
 
 	view_matrix: Mat4,
 	proj_matrix: Mat4,
 
-	// `proj_matrix * view_matrix`. Kept around because every draw call needs it. Update it with
-	// `_update_view_projection`.
+	// `proj_matrix * view_matrix`. Set when `_update_projection_matrix` runs.
 	view_projection: Mat4,
 
 	z: f32,
@@ -1929,7 +1970,7 @@ State :: struct {
 	audio_backend: Audio_Backend_Interface,
 	audio_backend_state: rawptr,
 
-	audio_clips: hm.Dynamic_Handle_Map(Audio_Clip_Object, Audio_Clip),
+	audio_buffers: hm.Dynamic_Handle_Map(Audio_Buffer_Object, Audio_Buffer),
 	sounds: hm.Dynamic_Handle_Map(Sound_Object, Sound),
 
 	audio_streams: hm.Dynamic_Handle_Map(Audio_Stream_Data, Audio_Stream),
@@ -1960,15 +2001,19 @@ Mouse_Button :: enum {
 }
 
 // The maximum number of touches Karl2D tracks at once. Ten fingers, plus the one
-// `set_touch_events_from_mouse` makes from the mouse.
+// `set_mouse_touch_emulation` makes from the mouse.
 MAX_TOUCHES :: 11
 
 // Identifies one finger for as long as it stays on the screen. Stable from the moment the touch
 // goes down until it goes up. Ids may be reused after that.
 Touch_Id :: distinct u64
 
-// The id of the touch synthesized by `set_touch_events_from_mouse`. Never collides with a real id.
+// Touch ID when the mouse is being used to emulate touch.
 EMULATED_TOUCH_ID :: max(Touch_Id)
+
+// When emulating mouse events using Mouse_Touch_Emulation.Touch_To_Mouse, then this signifies that
+// a touch event is not associated with the mouse.
+TOUCH_TO_MOUSE_ID_NONE :: max(Touch_Id) - 1
 
 Touch :: struct {
 	id: Touch_Id,
@@ -1988,6 +2033,18 @@ Touch :: struct {
 	// The OS threw the touch away, for example due to palm rejection or the window losing focus.
 	// `went_up` is set as well, so code that doesn't care about the difference still works.
 	cancelled: bool,
+}
+
+Mouse_Touch_Emulation :: enum {
+	// No automatic conversion between touch and mouse events.
+	None,
+
+	// Touch events become left mouse button events. Useful for making a mouse-only game work on
+	// web. This is set by default.
+	Touch_To_Mouse,
+
+	// Mouse events become touch events. Useful for testing basic touch controls on desktop.
+	Mouse_To_Touch,
 }
 
 // Based on Raylib / GLFW

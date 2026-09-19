@@ -42,7 +42,7 @@ When you report on the checklist, write only the items that made you do somethin
 
 ## Commit messages
 
-Write them like a tweet, max 180 characters. Only simple sentences. Only allowed punctuation is the period. If possible, keep them to 3-4 words. Use more words if really needed.
+Write them like a tweet, max 180 characters. Only simple sentences. Only allowed punctuation is the period. If possible, keep them to 3-4 words. Use more words if really needed. CLAUDE co-authored-by line at the end.
 
 ### The testing and reviewing checklist
 
@@ -56,16 +56,13 @@ Platform specific code reviewed
 - [ ] Windows
 - [ ] Mac
 - [ ] Web
-- [ ] Linux Wayland
-- [ ] Linux X11
+- [ ] Linux
 
 Tested on:
 - [ ] Windows
 - [ ] Mac
 - [ ] Web
-- [ ] Linux Wayland
-- [ ] Linux Wayland GNOME
-- [ ] Linux X11
+- [ ] Linux
 ```
 
 Cut it down to what the change actually touches. A list full of lines nobody needs to look at makes the ones that matter easy to miss.
@@ -151,7 +148,7 @@ Cut it down to what the change actually touches. A list full of lines nobody nee
 - The only two things such a procedure does with them is a naked `return` on every failure path and one real `return value, true` at the end. Never assign to `_clip` or `_ok` themselves.
 - That is what the underscore is for. Assigning to a named return part way through is how they turn into bugs: a later naked `return` then hands back whatever was assigned instead of the zero value, and the reader has to track every assignment to know what actually comes out. A name that starts with `_` does not read like a variable you were meant to write to, so it doesn't happen by accident.
 - This works because every `<TYPE>_NONE` is the zero value of its type, so a naked `return` gives back exactly what the explicit `return SOMETHING_NONE, false` did.
-- The other reason to name them has nothing to do with naked returns: a procedure whose return values are not obvious from their types can name them to say what they are. `wldeco_canvas_size` in `platform_linux_window_wayland_decorations.odin` returns `(canvas_width: int, canvas_height: int)` and takes two ints as well, so without the names the reader cannot tell which way it converts.
+- The other reason to name them has nothing to do with naked returns: a procedure whose return values are not obvious from their types can name them to say what they are. `wlcsd_canvas_size` in `platform_linux_window_wayland_client_side_decorations.odin` returns `(canvas_width: int, canvas_height: int)` and takes two ints as well, so without the names the reader cannot tell which way it converts.
 - Names used that way carry no underscore, because there is no naked return for the underscore to protect. The procedure still returns its values explicitly on every path, and still never assigns to the names.
 
 ### Avoid `defer`; write the cleanup where it happens

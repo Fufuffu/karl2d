@@ -546,7 +546,7 @@ windows_set_window_mode :: proc(window_mode: Window_Mode) {
 	}
 }
 
-windows_set_window_icon :: proc(image: Image, _: bool) -> bool {
+windows_set_window_icon :: proc(image: Image) -> bool {
 	hicon := windows_create_hicon(image, {0, 0}, true)
 
 	if hicon == nil {
@@ -708,6 +708,10 @@ windows_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_C
 }
 
 windows_set_cursor :: proc(cursor: Cursor) {
+	if cursor == s.current_cursor {
+		return
+	}
+
 	// Reject a stale handle, so a programming error leaves the cursor alone.
 	if c, is_custom := cursor.(Custom_Cursor); is_custom {
 		if hm.get(&s.custom_cursors, c) == nil {

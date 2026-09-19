@@ -121,7 +121,7 @@ rbnil_load_texture_compressed :: proc(
 	return {}, false
 }
 
-rbnil_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect) -> bool {
+rbnil_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect, pitch: int) -> bool {
 	return true
 }
 
