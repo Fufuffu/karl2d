@@ -13,6 +13,10 @@ package karl2d
 // The window might be slightly larger due to borders and headers. The true width and height will be
 // scaled up by the scaling setting in the operating system.
 //
+// Use the argument `options = { window_mode = .Borderless_Fullscreen }` to start the game in full-
+// screen mode. Note that `screen_width` and `screen_height` don't apply to borderless fullscreen.
+// It will use the full resolution of the desktop.
+//
 // Karl2D will use `allocator` for all dynamically allocated memory that is needed more than one
 // frame. For single frame allocations the library uses an internal "frame allocator".
 // The frame allocator is cleared when `update()` runs.
@@ -80,8 +84,8 @@ shutdown :: proc()
 // be cleared instead.
 clear :: proc(color: Color)
 
-// The library may do some internal allocations that have the lifetime of a single frame. This
-// procedure empties that Frame Allocator.
+// The library may do some internal allocations that have the lifetime of a single frame. Those
+// allocations go into a Frame Allocator. This procedure empties that Frame Allocator.
 //
 // Called as part of `update`, but can be called manually if you need more control.
 reset_frame_allocator :: proc()
@@ -908,15 +912,37 @@ rect_cut_left :: proc(r: ^Rect, w: f32, m: f32) -> Rect
 // `m` is the margin added to the right of the cut part.
 rect_cut_right :: proc(r: ^Rect, w: f32, m: f32) -> Rect
 
-// TODO: Add _right, _top, _bottom variations
-//
-// Split `r` in half horizontally. Split at position `x`, offest by margin `m`. Returns the left and
+// Split `r` in half horizontally. Split at position `x`, offset by margin `m`. Returns the left and
 // right result of the split.
 rect_split_left :: proc(
 	r: Rect,
 	x: f32,
 	m: f32,
 ) -> (left: Rect, right: Rect)
+
+// Split `r` in half vertically. Split at position `y`, offset by margin `m`. Returns the top and
+// bottom result of the split.
+rect_split_top :: proc(
+	r: Rect,
+	y: f32,
+	m: f32,
+) -> (top: Rect, bottom: Rect)
+
+// Split `r` in half horizontally. Split at position `x`, offset by margin `m`. Returns the left and
+// right result of the split.
+rect_split_right :: proc(
+	r: Rect,
+	x: f32,
+	m: f32,
+) -> (left: Rect, right: Rect)
+
+// Split `r` in half vertically. Split at position `y`, offset by margin `m`. Returns the top and
+// bottom result of the split.
+rect_split_bottom :: proc(
+	r: Rect,
+	y: f32,
+	m: f32,
+) -> (top: Rect, bottom: Rect)
 
 // Rotate 2D vector `v` by `angle_radians` radians around the origin (0, 0).
 //
