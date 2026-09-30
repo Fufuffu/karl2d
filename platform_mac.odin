@@ -23,6 +23,7 @@ PLATFORM_MAC :: Platform_Interface {
 	shutdown = mac_shutdown,
 	get_window_render_glue = mac_get_window_render_glue,
 	get_events = mac_get_events,
+	before_present = mac_before_present,
 	set_window_title = mac_set_window_title,
 	set_screen_size = mac_set_screen_size,
 	get_screen_width = mac_get_screen_width,
@@ -85,7 +86,7 @@ Mac_State :: struct {
 	// already reported as held so we can tell a press from a release. See `.FlagsChanged`.
 	modifier_key_is_held: #sparse [Keyboard_Key]bool,
 
-	window_render_glue: Window_Render_Glue,
+	window_render_glue: ^Window_Render_Glue,
 
 	// The application icon and the pixels it was built from. Both nil until
 	// `mac_set_window_icon` runs.
@@ -301,7 +302,7 @@ mac_init :: proc(
 	install_cursor_tracker()
 
 	when RENDER_BACKEND_NAME == "gl" {
-		s.window_render_glue = make_mac_gl_glue(s.window, s.allocator)
+		s.window_render_glue = create_mac_gl_glue(s.window, s.allocator)
 	} else when RENDER_BACKEND_NAME == "nil" {
 		s.window_render_glue = {}
 	} else {
@@ -335,8 +336,11 @@ mac_shutdown :: proc() {
 	free(s.gc_disconnect_blk, a)
 }
 
-mac_get_window_render_glue :: proc() -> Window_Render_Glue {
+mac_get_window_render_glue :: proc() -> ^Window_Render_Glue {
 	return s.window_render_glue
+}
+
+mac_before_present :: proc() {
 }
 
 mac_get_events :: proc(events: ^[dynamic]Event) {

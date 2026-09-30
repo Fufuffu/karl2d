@@ -37,6 +37,10 @@ import hm "core:container/handle_map"
 // The window might be slightly larger due to borders and headers. The true width and height will be
 // scaled up by the scaling setting in the operating system.
 //
+// Use the argument `options = { window_mode = .Borderless_Fullscreen }` to start the game in full-
+// screen mode. Note that `screen_width` and `screen_height` don't apply to borderless fullscreen.
+// It will use the full resolution of the desktop.
+//
 // Karl2D will use `allocator` for all dynamically allocated memory that is needed more than one
 // frame. For single frame allocations the library uses an internal "frame allocator".
 // The frame allocator is cleared when `update()` runs.
@@ -95,7 +99,8 @@ init :: proc(
 	pf.set_window_icon(default_icon)
 	destroy_image(default_icon)
 
-	// This is an OS-independent handle that we can pass to any rendering backend.
+	// This is an OS-independent handle that we can pass to any rendering backend. It lets the
+	// rendering backend draw into the window.
 	window_render_glue := pf.get_window_render_glue()
 
 	// See `render_backend_chooser.odin` for how this is picked.
@@ -187,43 +192,82 @@ init :: proc(
 
 	// Audio
 	{
-		s.audio_backend = AUDIO_BACKEND
-		ab = s.audio_backend
-
 		mem.arena_init(
 			&s.audio_thread_temp_allocator_arena,
 			s.audio_thread_temp_allocator_buffer[:],
 		)
 
-		audio_alloc_error: runtime.Allocator_Error
-		s.audio_backend_state, audio_alloc_error = mem.alloc(ab.state_size(), allocator = s.allocator)
-		log.assertf(audio_alloc_error == nil, "Failed allocating memory for audio backend: %v", audio_alloc_error)
-
 		hm.dynamic_init(&s.sounds, s.allocator)
 		hm.dynamic_init(&s.audio_buffers, s.allocator)
 		hm.dynamic_init(&s.audio_streams, s.allocator)
 		hm.dynamic_init(&s.audio_buses, s.allocator)
-		s.master_bus.target_settings = DEFAULT_AUDIO_BUS_SETTINGS
-		s.master_bus.current_settings = DEFAULT_AUDIO_BUS_SETTINGS
 
-		audio_init_ok := ab.init(s.audio_backend_state)
-
-		if !audio_init_ok {
-			log.error("Failed initializing audio backend. Sounds will play silently through the 'nil audio backend'")
-			free(s.audio_backend_state, s.allocator)
-			s.audio_backend = AUDIO_BACKEND_NIL
-			ab = s.audio_backend
-			s.audio_backend_state, audio_alloc_error = mem.alloc(
-				ab.state_size(),
-				allocator = s.allocator,
-			)
-			log.assertf(
-				audio_alloc_error == nil,
-				"Failed allocating memory for audio backend: %v",
-				audio_alloc_error,
-			)
-			ab.init(s.audio_backend_state)
+		s.master_bus = {
+			target_settings = DEFAULT_AUDIO_BUS_SETTINGS,
+			current_settings = DEFAULT_AUDIO_BUS_SETTINGS,
 		}
+
+		ab := create_audio_backend(allocator, loc)
+		ab_ok := false
+
+		if ab != nil {
+			s.ab = ab
+
+			if s.ab.has_mixer_thread {
+				log.ensure(
+					s.ab.start_mixer_thread != nil &&
+					s.ab.push_samples == nil &&
+					s.ab.pushed_samples_remaining == nil,
+				)
+
+				thread_ok := s.ab->start_mixer_thread()
+
+				if thread_ok {
+					ab_ok = true
+				}
+			} else {
+				log.ensure(
+					s.ab.start_mixer_thread == nil &&
+					s.ab.push_samples != nil &&
+					s.ab.pushed_samples_remaining != nil,
+				)
+
+				// The master bus chunk is only used when there is no mixer thread. Backends with
+				// their own mixer thread will provide `_mix_audio_into_buffer` with a slice of
+				// samples of their own. That mixer-thread owned slice then replaces the master bus
+				// chunk.
+				log.ensure(s.ab.mix_chunk_size > 0)
+				s.master_bus.chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator)
+
+				ab_ok = true
+			}
+		}
+
+		if !ab_ok {
+			if ab != nil {
+				ab->destroy()
+			}
+
+			log.error("Failed initializing audio backend. Sounds will play silently through the 'nil audio backend'")
+			ab = abnil_create(allocator, loc)
+			log.ensure(ab != nil, "Failed initializing nil audio backend state")
+			s.ab = ab
+
+			// Nil audio backend does not have a mixer thread.
+
+			log.ensure(
+				s.ab.start_mixer_thread == nil &&
+				s.ab.push_samples != nil &&
+				s.ab.pushed_samples_remaining != nil,
+			)
+
+			log.ensure(s.ab.mix_chunk_size > 0)
+			s.master_bus.chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator)
+
+			ab_ok = true
+		}
+
+		log.ensure(ab_ok == true)
 	}
 
 	return s
@@ -279,12 +323,12 @@ shutdown :: proc() {
 
 	// Audio
 	{
-		ab.shutdown()
+		s.ab->destroy()
+		delete(s.master_bus.chunk, s.allocator)
 		hm.dynamic_destroy(&s.audio_streams)
 		hm.dynamic_destroy(&s.sounds)
 		hm.dynamic_destroy(&s.audio_buffers)
 		hm.dynamic_destroy(&s.audio_buses)
-		free(s.audio_backend_state, s.allocator)
 	}
 
 	delete(s.events)
@@ -320,8 +364,8 @@ clear :: proc(color: Color) {
 	rb.clear(s.current_render_target, color)
 }
 
-// The library may do some internal allocations that have the lifetime of a single frame. This
-// procedure empties that Frame Allocator.
+// The library may do some internal allocations that have the lifetime of a single frame. Those
+// allocations go into a Frame Allocator. This procedure empties that Frame Allocator.
 //
 // Called as part of `update`, but can be called manually if you need more control.
 reset_frame_allocator :: proc() {
@@ -363,6 +407,7 @@ calculate_frame_time :: proc() {
 present :: proc() {
 	assert_initialized()
 	draw_current_batch()
+	pf.before_present()
 	rb.present()
 }
 
@@ -554,7 +599,8 @@ process_events :: proc() {
 
 		case Event_Touch_Cancelled:
 			if t := _find_touch(e.id); t != nil {
-				// Position and delta are left as they are, see `Event_Touch_Cancelled`.
+				// The position is left as it is. The Touch Cancelled event does not carry it, so we
+				// reuse the position from the last frame.
 				t.went_up = true
 				t.cancelled = true
 			}
@@ -3825,16 +3871,20 @@ play_audio_stream :: proc(
 // A new bus has volume 1, pan 0 and no effect. That makes it a passthrough: Playing a sound on a
 // fresh bus sounds exactly like playing it on the master bus, until you change something.
 create_audio_bus :: proc() -> Audio_Bus {
-	sync.mutex_guard(&s.audio_mutex)
-	bus_object := Audio_Bus_Object {
+	assert(s.ab.mix_chunk_size > 0)
+
+	abo := Audio_Bus_Object {
 		target_settings = DEFAULT_AUDIO_BUS_SETTINGS,
 		current_settings = DEFAULT_AUDIO_BUS_SETTINGS,
+		chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator),
 	}
 
-	bus, add_err := hm.add(&s.audio_buses, bus_object)
+	sync.mutex_guard(&s.audio_mutex)
+	bus, add_err := hm.add(&s.audio_buses, abo)
 
 	if add_err != nil {
 		log.errorf("Failed creating audio bus. Error: %v", add_err)
+		delete(abo.chunk, s.allocator)
 
 		// The master bus always exists, so anything routed to this handle still plays.
 		return AUDIO_BUS_MASTER
@@ -3852,7 +3902,9 @@ destroy_audio_bus :: proc(bus: Audio_Bus) {
 		return
 	}
 
-	if hm.get(&s.audio_buses, bus) == nil {
+	abo := hm.get(&s.audio_buses, bus)
+
+	if abo == nil {
 		log.error("Cannot destroy audio bus, audio bus does not exist.")
 		return
 	}
@@ -3866,6 +3918,8 @@ destroy_audio_bus :: proc(bus: Audio_Bus) {
 			sound_object.bus = AUDIO_BUS_MASTER
 		}
 	}
+
+	delete(abo.chunk, s.allocator)
 
 	hm.remove(&s.audio_buses, bus)
 }
@@ -3949,9 +4003,9 @@ update_audio :: proc() {
 
 	// If the platform has mixer thread then `_mix_audio_into_buffer` will be called from that
 	// thread instead.
-	if !ab.has_mixer_thread {
+	if !s.ab.has_mixer_thread {
 		assert(
-			ab.push_samples != nil && ab.pushed_samples_remaining != nil,
+			s.ab.push_samples != nil && s.ab.pushed_samples_remaining != nil,
 			"Audio backend that does not mix itself must accept samples through `push_samples` and also implement `pushed_samples_remaining`",
 		)
 
@@ -3962,17 +4016,17 @@ update_audio :: proc() {
 		master_bus_chunk := s.master_bus.chunk[:]
 
 		for _ in 0..<MAX_CHUNKS_PER_UPDATE {
-			// If the sample rate of the backend is 44100 samples/second and AUDIO_MIX_CHUNK_SIZE is
+			// If the sample rate of the backend is 44100 samples/second and s.ab.mix_chunk_size is
 			// 1400 samples, then this procedure will only run roughly 44100/1400 = 31 times per
 			// second. This gives a latency of up to (1.5 * (44100/1400)) = 47 milliseconds.
 			//
-			// Note that AUDIO_MIX_CHUNK_SIZE varies, it depends on the audio backend.
-			if ab.pushed_samples_remaining() > (3 * AUDIO_MIX_CHUNK_SIZE)/2 {
+			// Note that s.ab.mix_chunk_size varies from audio backend to audio backend.
+			if s.ab->pushed_samples_remaining() > (3 * s.ab.mix_chunk_size)/2 {
 				break
 			}
 
 			_mix_audio_into_buffer(master_bus_chunk[:])
-			ab.push_samples(master_bus_chunk[:])
+			s.ab->push_samples(master_bus_chunk[:])
 		}
 	}
 }
@@ -3990,11 +4044,11 @@ update_audio :: proc() {
 // for non-crucial logging formatting. If called from an audio thread, then that thread must use
 // `context = _audio_thread_context()`.
 _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
-	if ab.has_mixer_thread {
+	if s.ab.has_mixer_thread {
 		assert(context.user_index == _AUDIO_THREAD_CONTEXT_MARKER)
 	}
 
-	assert(len(buffer) == AUDIO_MIX_CHUNK_SIZE)
+	assert(len(buffer) == s.ab.mix_chunk_size)
 	sync.mutex_guard(&s.audio_mutex)
 
 	// `buffer` is where the final mix should go. The final mix is the master bus.
@@ -4147,10 +4201,10 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 	// Used for the smooth adjustment of volume, pan and pitch, both for the playing sounds below
 	// and for the buses further down.
 
-	calc_adjust_parameter_delta :: proc(sample_rate: int, pitch: f32) -> f32 {
+	calc_adjust_parameter_delta :: proc(chunk_size: int, sample_rate: int, pitch: f32) -> f32 {
 		RAMP_TIME :: 0.03
 		ramp_samples := RAMP_TIME * f32(sample_rate) * pitch
-		return f32(AUDIO_MIX_CHUNK_SIZE) / ramp_samples
+		return f32(chunk_size) / ramp_samples
 	}
 
 	move_towards :: proc(current: f32, target: f32, delta: f32) -> f32 {
@@ -4161,6 +4215,8 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 		dir := math.sign(target - current)
 		return current + dir * delta
 	}
+
+	mix_chunk_size := s.ab.mix_chunk_size
 
 	for ps_iter := hm.dynamic_iterator_make(&s.sounds); ps, _ in hm.dynamic_iterate(&ps_iter) {
 		if ps.remove {
@@ -4199,10 +4255,10 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 		target_settings := &ps.target_settings
 
 		// We get the delta twice because we first need to move the pitch towards its target.
-		adjust_parameter_delta := calc_adjust_parameter_delta(data.sample_rate, max(settings.pitch, 0.01))
+		adjust_parameter_delta := calc_adjust_parameter_delta(mix_chunk_size, data.sample_rate, max(settings.pitch, 0.01))
 		settings.pitch = max(move_towards(settings.pitch, target_settings.pitch, adjust_parameter_delta), 0.01)
 		pitch := settings.pitch
-		adjust_parameter_delta = calc_adjust_parameter_delta(data.sample_rate, pitch)
+		adjust_parameter_delta = calc_adjust_parameter_delta(mix_chunk_size, data.sample_rate, pitch)
 
 		// `set_sound_time` doesn't seek the sound itself, it just says where the sound should go.
 		// For sounds based on audio clips we seek it here (after fading it out, so it doesn't
@@ -4250,7 +4306,7 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 		}
 
 		// We can't just use the `volume_end` value for the volume. We are going to mix in
-		// `AUDIO_MIX_CHUNK_SIZE` number of samples. We'd still get clicks in the sound if we hopped
+		// `mix_chunk_size` number of samples. We'd still get clicks in the sound if we hopped
 		// to the ending volume. Instead, we calculate what the first sample should use and what
 		// the last one should use. Then we feed those into the `add`/`add_interpolate` procedures.
 		// It will lerp across the range as it is mixing in the samples.
@@ -4297,7 +4353,7 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 			data.channels,
 			interpolate,
 			source_dest_ratio,
-			AUDIO_MIX_CHUNK_SIZE,
+			s.ab.mix_chunk_size,
 			ps.offset_fraction,
 			volume_start,
 			volume_end,
@@ -4320,7 +4376,7 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 		}
 
 		// We didn't mix all the samples! This means that we reached the end of the sound.
-		if num_mixed < AUDIO_MIX_CHUNK_SIZE {
+		if num_mixed < mix_chunk_size {
 			if ps.loop {
 				ps.offset = 0
 				ps.offset_fraction = 0
@@ -4328,12 +4384,12 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 				// The sound looped. Make sure to mix in the remaining samples from the start of the
 				// sound!
 				mixed_before_loop := num_mixed
-				overflow := AUDIO_MIX_CHUNK_SIZE - mixed_before_loop
+				overflow := mix_chunk_size - mixed_before_loop
 
 				// Carry the volume and pan ramps on from where the first part of the chunk got to.
 				// Starting them over would jump the volume back up in the middle of the chunk,
 				// which is heard as a click.
-				split := f32(mixed_before_loop) / f32(AUDIO_MIX_CHUNK_SIZE)
+				split := f32(mixed_before_loop) / f32(mix_chunk_size)
 				volume_split := math.lerp(volume_start, volume_end, split)
 				pan_stereo_split := linalg.lerp(pan_stereo_start, pan_stereo_end, split)
 
@@ -4378,7 +4434,7 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 
 	// The buses run at the mixer's sample rate and are never pitched, so the ramp is the same for
 	// all of them.
-	bus_adjust_delta := calc_adjust_parameter_delta(AUDIO_MIX_SAMPLE_RATE, 1)
+	bus_adjust_delta := calc_adjust_parameter_delta(mix_chunk_size, AUDIO_MIX_SAMPLE_RATE, 1)
 
 	for it := hm.dynamic_iterator_make(&s.audio_buses); bus, _ in hm.dynamic_iterate(&it) {
 		// The effect runs even when the bus is silent. Effects tend to keep state, such as a filter
@@ -4413,8 +4469,8 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 			volume_end * min(1, 1 + pan_end),
 		}
 
-		for samp_idx in 0..<AUDIO_MIX_CHUNK_SIZE {
-			t := f32(samp_idx) / f32(AUDIO_MIX_CHUNK_SIZE)
+		for samp_idx in 0..<mix_chunk_size {
+			t := f32(samp_idx) / f32(mix_chunk_size)
 			master_bus_chunk[samp_idx] += bus.chunk[samp_idx] * linalg.lerp(gain_start, gain_end, t)
 		}
 	}
@@ -4449,8 +4505,8 @@ _mix_audio_into_buffer :: proc(buffer: [][2]Audio_Sample) {
 			volume_end * min(1, 1 + pan_end),
 		}
 
-		for samp_idx in 0..<AUDIO_MIX_CHUNK_SIZE {
-			t := f32(samp_idx) / f32(AUDIO_MIX_CHUNK_SIZE)
+		for samp_idx in 0..<mix_chunk_size {
+			t := f32(samp_idx) / f32(mix_chunk_size)
 			buffer[samp_idx] *= linalg.lerp(gain_start, gain_end, t)
 		}
 	}
@@ -4707,9 +4763,7 @@ rect_cut_right :: proc(r: ^Rect, w: f32, m: f32) -> Rect {
 	return res
 }
 
-// TODO: Add _right, _top, _bottom variations
-//
-// Split `r` in half horizontally. Split at position `x`, offest by margin `m`. Returns the left and
+// Split `r` in half horizontally. Split at position `x`, offset by margin `m`. Returns the left and
 // right result of the split.
 rect_split_left :: proc(
 	r: Rect,
@@ -4725,6 +4779,60 @@ rect_split_left :: proc(
 	right.x += x + m
 	right.w -= x + m
 	return left, right
+}
+
+// Split `r` in half vertically. Split at position `y`, offset by margin `m`. Returns the top and
+// bottom result of the split.
+rect_split_top :: proc(
+	r: Rect,
+	y: f32,
+	m: f32,
+) -> (
+	top: Rect,
+	bottom: Rect,
+) {
+	top = r
+	bottom = r
+	top.h = y
+	bottom.y += y + m
+	bottom.h -= y + m
+	return top, bottom
+}
+
+// Split `r` in half horizontally. Split at position `x`, offset by margin `m`. Returns the left and
+// right result of the split.
+rect_split_right :: proc(
+	r: Rect,
+	x: f32,
+	m: f32,
+) -> (
+	left: Rect,
+	right: Rect,
+) {
+	left = r
+	right = r
+	right.w = x
+	right.x = (r.x + r.w) - x
+	left.w -= x + m
+	return left, right
+}
+
+// Split `r` in half vertically. Split at position `y`, offset by margin `m`. Returns the top and
+// bottom result of the split.
+rect_split_bottom :: proc(
+	r: Rect,
+	y: f32,
+	m: f32,
+) -> (
+	top: Rect,
+	bottom: Rect,
+) {
+	top = r
+	bottom = r
+	bottom.h = y
+	bottom.y = (r.y + r.h) - y
+	top.h -= y + m
+	return top, bottom
 }
 
 
@@ -5761,10 +5869,8 @@ set_internal_state :: proc(state: ^State) {
 	s = state
 	frame_allocator = s.frame_allocator
 	rb = s.render_backend
-	ab = s.audio_backend
 	pf.set_internal_state(s.platform_state)
 	rb.set_internal_state(s.render_backend_state)
-	ab.set_internal_state(s.audio_backend_state)
 }
 
 Open_URL_Error :: enum {
@@ -6292,7 +6398,6 @@ TEXTURE_NONE :: Texture_Handle {}
 RENDER_TARGET_NONE :: Render_Target_Handle {}
 
 AUDIO_MIX_SAMPLE_RATE :: 44100
-AUDIO_MIX_CHUNK_SIZE :: AUDIO_BACKEND.mix_chunk_size
 
 // Single channel audio sample. Can have a value between -1 and 1. For stereo sound every other
 // sample in an array of samples will be interpreted as left and right respectively.
@@ -6537,7 +6642,9 @@ Audio_Bus_Object :: struct {
 	// The sounds routed to this bus are mixed in here. The bus effect runs on this. Then this is
 	// mixed into the master bus. Unused for the master bus itself: That one is mixed straight into
 	// `mix_buffer`.
-	chunk: [AUDIO_MIX_CHUNK_SIZE][2]Audio_Sample,
+	//
+	// Will be `s.ab.mix_chunk_size` long.
+	chunk: [][2]Audio_Sample,
 }
 
 DEFAULT_AUDIO_BUS_SETTINGS :: Audio_Bus_Settings {
@@ -6651,8 +6758,9 @@ State :: struct {
 
 	// -----
 	// Audio
-	audio_backend: Audio_Backend_Interface,
-	audio_backend_state: rawptr,
+
+	// Audio Backend. Shortened because we write `s.ab` many times.
+	ab: ^Audio_Backend_Interface,
 
 	audio_buffers: hm.Dynamic_Handle_Map(Audio_Buffer_Object, Audio_Buffer),
 	sounds: hm.Dynamic_Handle_Map(Sound_Object, Sound),
@@ -7596,9 +7704,6 @@ pf :: PLATFORM
 @(private="file")
 rb: Render_Backend_Interface
 
-@(private="file")
-ab: Audio_Backend_Interface
-
 // This is here so it can be used from other files in this directory (`s.frame_allocator` can't be
 // reached outside this file).
 frame_allocator: runtime.Allocator
@@ -7813,6 +7918,8 @@ f32_color_from_color :: proc(color: Color) -> Color_F32 {
 color_from_f32_color :: proc(color: Color_F32) -> Color {
 	return (Color)(color*255)
 }
+
+Allocator :: runtime.Allocator
 
 load_texture_from_bytes_compressed :: proc(
 	bytes: []u8,

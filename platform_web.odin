@@ -12,6 +12,7 @@ PLATFORM_WEB :: Platform_Interface {
 	shutdown = web_shutdown,
 	get_window_render_glue = web_get_window_render_glue,
 	get_events = web_get_events,
+	before_present = web_before_present,
 	set_window_title = web_set_window_title,
 	set_screen_size = web_set_screen_size,
 	get_screen_width = web_get_screen_width,
@@ -340,12 +341,10 @@ web_shutdown :: proc() {
 	delete(s.key_from_js_event_key_code)
 }
 
-web_get_window_render_glue :: proc() -> Window_Render_Glue {
-	// We can only use WebGL backend right now, so this is very simple: Just pass canvas ID as
-	// state, the WebGL backend knows to convert it properly.
-	return {
-		state = (^Window_Render_Glue_State)(&s.canvas_id),
-	}
+web_get_window_render_glue :: proc() -> ^Window_Render_Glue {
+	// We can only use WebGL backend right now, so this is very simple: Just pass a pointer to the 
+	// canvas ID string. 
+	return (^Window_Render_Glue)(&s.canvas_id)
 }
 
 // This works for XBox controller -- does it work for PlayStation?
@@ -376,6 +375,9 @@ KARL2D_GAMEPAD_BUTTON_FROM_JS :: [Gamepad_Button]int {
 	.Middle_Face_Left = 8, 
 	.Middle_Face_Middle = -1, 
 	.Middle_Face_Right = 9, 
+}
+
+web_before_present :: proc() {
 }
 
 web_get_events :: proc(events: ^[dynamic]Event) {

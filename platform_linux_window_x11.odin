@@ -11,6 +11,7 @@ LINUX_WINDOW_X11 :: Linux_Window_Interface {
 	shutdown = x11_shutdown,
 	get_window_render_glue = x11_get_window_render_glue,
 	get_events = x11_get_events,
+	before_present = x11_before_present,
 	set_title = x11_set_title,
 	get_screen_width = x11_get_screen_width,
 	get_screen_height = x11_get_screen_height,
@@ -198,7 +199,7 @@ x11_init :: proc(
 	}
 	
 	when RENDER_BACKEND_NAME == "gl" {
-		s.window_render_glue = make_linux_gl_x11_glue(s.display, s.window, s.allocator)
+		s.window_render_glue = create_linux_gl_x11_glue(s.display, s.window, s.allocator)
 	} else when RENDER_BACKEND_NAME == "nil" {
 		s.window_render_glue = {}
 	} else {
@@ -232,8 +233,11 @@ x11_shutdown :: proc() {
 	X.DestroyWindow(s.display, s.window)
 }
 
-x11_get_window_render_glue :: proc() -> Window_Render_Glue {
+x11_get_window_render_glue :: proc() -> ^Window_Render_Glue {
 	return s.window_render_glue
+}
+
+x11_before_present :: proc() {
 }
 
 x11_get_events :: proc(events: ^[dynamic]Event) {
@@ -921,7 +925,7 @@ X11_State :: struct {
 	window: X.Window,
 	delete_msg: X.Atom,
 	window_mode: Window_Mode,
-	window_render_glue: Window_Render_Glue,
+	window_render_glue: ^Window_Render_Glue,
 	blank_cursor: X.Cursor,
 
 	custom_cursors: hm.Dynamic_Handle_Map(X11_Cursor, Custom_Cursor),
