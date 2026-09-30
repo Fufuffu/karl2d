@@ -182,7 +182,8 @@ init :: proc(
 	s.fonts = make([dynamic]Font_Data, s.allocator)
 	append_nothing(&s.fonts)
 	fc.init_cache(&s.font_cache, s.allocator)
-	default_font := load_dynamic_font_from_bytes(DEFAULT_FONT_DATA)
+	// Use Linear to avoid malformed glyphs when not using perfectly scaled resolutions
+	default_font := load_dynamic_font_from_bytes(DEFAULT_FONT_DATA, {filter = .Linear})
 	log.assertf(default_font == FONT_DEFAULT, "Default font must be at index %i", FONT_DEFAULT)
 
 	s.events = make([dynamic]Event, s.allocator)
