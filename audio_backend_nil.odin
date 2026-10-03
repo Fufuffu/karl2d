@@ -4,32 +4,28 @@ package karl2d
 
 import "core:time"
 
-ABNil_Interface :: Audio_Backend_Interface {
-	destroy = abnil_destroy,
+ABNil_State :: struct {
+	using base_type: Audio_Backend_State,
+	start: time.Tick,
+	pushed: int,
+}
+
+AUDIO_BACKEND_NIL :: Audio_Backend_Interface {
+	state_type = ABNil_State,
+	init = abnil_init,
+	shutdown = abnil_shutdown,
 	mix_chunk_size = 700,
 	has_mixer_thread = false,
 	push_samples = abnil_push_samples,
 	pushed_samples_remaining = abnil_pushed_samples_remaining,
 }
 
-ABNil_State :: struct {
-	using interface: Audio_Backend_Interface,
-	allocator: Allocator,
-	start: time.Tick,
-	pushed: int,
-}
-
-abnil_create :: proc(allocator: Allocator, loc := #caller_location) -> ^Audio_Backend_Interface {
-	s := new(ABNil_State, allocator, loc)
-	s.interface = ABNil_Interface
-	s.allocator = allocator
+abnil_init :: proc(s: ^ABNil_State) -> bool {
 	s.start = time.tick_now()
-	return s
+	return true
 }
 
-abnil_destroy :: proc(s: ^ABNil_State) {
-	a := s.allocator
-	free(s, a)
+abnil_shutdown :: proc(s: ^ABNil_State) {
 }
 
 abnil_push_samples :: proc(s: ^ABNil_State, samples: [][2]Audio_Sample) {

@@ -11,37 +11,32 @@ import "core:sync"
 
 ALSA_BUFFER_SAMPLES :: 700
 
-ALSA_BACKEND_INTERFACE :: Audio_Backend_Interface {
-	destroy = alsa_destroy,
-	start_mixer_thread = alsa_start_mixer_thread,
+AUDIO_BACKEND_ALSA :: Audio_Backend_Interface {
+	state_type = Alsa_State,
+	init = alsa_init,
+	shutdown = alsa_shutdown,
 	mix_chunk_size = ALSA_BUFFER_SAMPLES,
 	has_mixer_thread = true,
+	push_samples = nil,
+	pushed_samples_remaining = nil,
 }
 
 Alsa_State :: struct {
-	using interface: Audio_Backend_Interface,
-	allocator: Allocator,
+	using _: Audio_Backend_State,
 	pcm: alsa.PCM,
 	buf: [ALSA_BUFFER_SAMPLES][2]Audio_Sample,
 	mix_thread: ^thread.Thread,
 	run_mix_thread: bool,
 }
 
-alsa_create :: proc(
-	allocator: Allocator,
-	loc := #caller_location
-) -> ^Audio_Backend_Interface {
-	s := new(Alsa_State, allocator, loc)
-	s.allocator = allocator
-	s.interface = ALSA_BACKEND_INTERFACE
+alsa_init :: proc(s: ^Alsa_State) -> bool {
 	log.debug("Init audio backend alsa")
 
 	missing, load_ok := alsa.load()
 
 	if !load_ok {
 		log.errorf("No sound. Could not load %v.", missing)
-		free(s, allocator)
-		return nil
+		return false
 	}
 
 	alsa_err: c.int
@@ -50,8 +45,7 @@ alsa_create :: proc(
 
 	if alsa_err < 0 {
 		log.errorf("pcm_open failed for 'default': %s", alsa.strerror(alsa_err))
-		free(s, allocator)
-		return nil
+		return false
 	}
 
 	LATENCY_MICROSECONDS :: 25000
@@ -68,8 +62,7 @@ alsa_create :: proc(
 	if alsa_err < 0 {
 		log.errorf("pcm_set_params failed: %s", alsa.strerror(alsa_err))
 		alsa.pcm_close(pcm)
-		free(s, allocator)
-		return nil
+		return false
 	}
 
 	alsa_err = alsa.pcm_prepare(pcm)
@@ -77,20 +70,16 @@ alsa_create :: proc(
 	if alsa_err < 0 {
 		log.errorf("pcm_prepare failed: %s", alsa.strerror(alsa_err))
 		alsa.pcm_close(pcm)
-		free(s, allocator)
-		return nil
+		return false
 	}
 	
 	s.pcm = pcm
-	return s
-}
-
-alsa_start_mixer_thread :: proc(s: ^Alsa_State) -> bool {
 	s.run_mix_thread = true
 	s.mix_thread = thread.create(alsa_thread_proc)
 
 	if s.mix_thread == nil {
 		log.errorf("Failed creating ALSA mixer thread")
+		alsa.pcm_close(pcm)
 		return false
 	}
 
@@ -137,7 +126,7 @@ alsa_thread_proc :: proc(t: ^thread.Thread) {
 	}
 }
 
-alsa_destroy :: proc(s: ^Alsa_State) {
+alsa_shutdown :: proc(s: ^Alsa_State) {
 	log.debug("Shutdown audio backend alsa")
 
 	if s.mix_thread != nil {
@@ -147,7 +136,5 @@ alsa_destroy :: proc(s: ^Alsa_State) {
 	}
 
 	alsa.pcm_close(s.pcm)
-	a := s.allocator
-	free(s, a)
 }
 

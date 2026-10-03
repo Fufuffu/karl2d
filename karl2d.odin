@@ -3,6 +3,7 @@
 package karl2d
 
 import "base:runtime"
+import "base:intrinsics"
 import "core:mem"
 import "log"
 import "core:math"
@@ -208,70 +209,65 @@ init :: proc(
 			current_settings = DEFAULT_AUDIO_BUS_SETTINGS,
 		}
 
-		ab := create_audio_backend(allocator, loc)
-		ab_ok := false
-
-		if ab != nil {
-			s.ab = ab
-
-			if s.ab.has_mixer_thread {
-				log.ensure(
-					s.ab.start_mixer_thread != nil &&
-					s.ab.push_samples == nil &&
-					s.ab.pushed_samples_remaining == nil,
-				)
-
-				thread_ok := s.ab->start_mixer_thread()
-
-				if thread_ok {
-					ab_ok = true
-				}
-			} else {
-				log.ensure(
-					s.ab.start_mixer_thread == nil &&
-					s.ab.push_samples != nil &&
-					s.ab.pushed_samples_remaining != nil,
-				)
-
-				// The master bus chunk is only used when there is no mixer thread. Backends with
-				// their own mixer thread will provide `_mix_audio_into_buffer` with a slice of
-				// samples of their own. That mixer-thread owned slice then replaces the master bus
-				// chunk.
-				log.ensure(s.ab.mix_chunk_size > 0)
-				s.master_bus.chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator)
-
-				ab_ok = true
-			}
-		}
+		ab_ok := _init_audio_backend(AUDIO_BACKEND)
 
 		if !ab_ok {
-			if ab != nil {
-				ab->destroy()
-			}
-
 			log.error("Failed initializing audio backend. Sounds will play silently through the 'nil audio backend'")
-			ab = abnil_create(allocator, loc)
-			log.ensure(ab != nil, "Failed initializing nil audio backend state")
-			s.ab = ab
-
-			// Nil audio backend does not have a mixer thread.
-
-			log.ensure(
-				s.ab.start_mixer_thread == nil &&
-				s.ab.push_samples != nil &&
-				s.ab.pushed_samples_remaining != nil,
-			)
-
-			log.ensure(s.ab.mix_chunk_size > 0)
-			s.master_bus.chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator)
-
-			ab_ok = true
+			nil_ab_ok := _init_audio_backend(AUDIO_BACKEND_NIL)
+			log.ensure(nil_ab_ok, "Failed initializing nil audio backend state")
 		}
-
-		log.ensure(ab_ok == true)
 	}
 
 	return s
+}
+
+_init_audio_backend :: proc(ab: Audio_Backend_Interface) -> bool {
+	log.ensure(ab.mix_chunk_size > 0)
+
+	if ab.state_type != nil {
+		ab_state_type := type_info_of(ab.state_type)
+
+		ab_state_mem, ab_state_mem_err := mem.alloc(
+			ab_state_type.size,
+			ab_state_type.align,
+			s.allocator,
+		)
+
+		if ab_state_mem_err != nil {
+			log.errorf(
+				"Failed allocating memory for audio backend state. Error: %v",
+				ab_state_mem_err,
+			)
+			return false
+		}
+
+		s.ab_state = (^Audio_Backend_State)(ab_state_mem)
+	}
+
+	s.ab = ab
+
+	if !s.ab.init(s.ab_state) {
+		free(s.ab_state, s.allocator)
+		s.ab = {}
+		s.ab_state = nil
+		return false
+	}
+
+	if s.ab.has_mixer_thread {
+		log.ensure(
+			s.ab.push_samples == nil &&
+			s.ab.pushed_samples_remaining == nil,
+		)
+	} else {
+		log.ensure(
+			s.ab.push_samples != nil &&
+			s.ab.pushed_samples_remaining != nil,
+		)
+
+		s.master_bus.chunk = make([][2]Audio_Sample, s.ab.mix_chunk_size, s.allocator)
+	}
+
+	return true
 }
 
 // Updates the internal state of the library. Call this early in the frame to make sure inputs and
@@ -324,7 +320,8 @@ shutdown :: proc() {
 
 	// Audio
 	{
-		s.ab->destroy()
+		s.ab.shutdown(s.ab_state)
+		free(s.ab_state, s.allocator)
 		delete(s.master_bus.chunk, s.allocator)
 		hm.dynamic_destroy(&s.audio_streams)
 		hm.dynamic_destroy(&s.sounds)
@@ -1150,7 +1147,7 @@ draw_rect_vec :: proc(
 	size: Vec2,
 	color: Color,
 	origin: Vec2 = {},
-	rotation: f32 = 0
+	rotation: f32 = 0,
 ) {
 	draw_rect(rect_from_pos_size(position, size), color, origin, rotation)
 }
@@ -4022,12 +4019,12 @@ update_audio :: proc() {
 			// second. This gives a latency of up to (1.5 * (44100/1400)) = 47 milliseconds.
 			//
 			// Note that s.ab.mix_chunk_size varies from audio backend to audio backend.
-			if s.ab->pushed_samples_remaining() > (3 * s.ab.mix_chunk_size)/2 {
+			if s.ab.pushed_samples_remaining(s.ab_state) > (3 * s.ab.mix_chunk_size)/2 {
 				break
 			}
 
 			_mix_audio_into_buffer(master_bus_chunk[:])
-			s.ab->push_samples(master_bus_chunk[:])
+			s.ab.push_samples(s.ab_state, master_bus_chunk[:])
 		}
 	}
 }
@@ -5331,7 +5328,7 @@ is_cursor_hidden :: proc() -> bool {
 load_shader_from_file :: proc(
 	vertex_filename: string,
 	fragment_filename: string,
-	layout_formats: []Pixel_Format = {}
+	layout_formats: []Pixel_Format = {},
 ) -> (Shader, bool) #optional_ok {
 	vertex_source, vertex_source_ok := read_entire_file(vertex_filename, frame_allocator)
 
@@ -6761,7 +6758,8 @@ State :: struct {
 	// Audio
 
 	// Audio Backend. Shortened because we write `s.ab` many times.
-	ab: ^Audio_Backend_Interface,
+	ab: Audio_Backend_Interface,
+	ab_state: ^Audio_Backend_State,
 
 	audio_buffers: hm.Dynamic_Handle_Map(Audio_Buffer_Object, Audio_Buffer),
 	sounds: hm.Dynamic_Handle_Map(Sound_Object, Sound),
