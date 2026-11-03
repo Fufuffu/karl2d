@@ -1,29 +1,33 @@
 #+build js
-#+private file
-
+#+vet explicit-allocators
+#+private package
 package karl2d
 
-@(private="package")
+import "base:runtime"
+import gl "vendor:wasm/WebGL"
+import hm "core:container/handle_map"
+import "log"
+import "core:strings"
+
 RENDER_BACKEND_WEBGL :: Render_Backend_Interface {
-	state_size = webgl_state_size,
+	state_type = WebGL_State,
 	init = webgl_init,
 	shutdown = webgl_shutdown,
 	clear = webgl_clear,
 	present = webgl_present,
+	set_vsync = webgl_set_vsync,
 	draw = webgl_draw,
 	resize_swapchain = webgl_resize_swapchain,
 	get_swapchain_width = webgl_get_swapchain_width,
 	get_swapchain_height = webgl_get_swapchain_height,
-	set_internal_state = webgl_set_internal_state,
 	create_texture = webgl_create_texture,
 	load_texture = webgl_load_texture,
 	load_texture_compressed = webgl_load_texture_compressed,
 	update_texture = webgl_update_texture,
 	destroy_texture = webgl_destroy_texture,
-	texture_needs_vertical_flip = webgl_texture_needs_vertical_flip,
+	flip_render_textures = true,
 	create_render_texture = webgl_create_render_texture,
 	destroy_render_target = webgl_destroy_render_target,
-	set_texture_filter = webgl_set_texture_filter,
 	load_shader = webgl_load_shader,
 	destroy_shader = webgl_destroy_shader,
 
@@ -32,25 +36,19 @@ RENDER_BACKEND_WEBGL :: Render_Backend_Interface {
 	get_depth_clip_range = webgl_get_depth_clip_range,
 }
 
-import "base:runtime"
-import gl "vendor:wasm/WebGL"
-import hm "core:container/handle_map"
-import "log"
-import "core:strings"
-import la "core:math/linalg"
-
-_ :: la
-
 WebGL_State :: struct {
+	using _: Render_Backend_State,
 	canvas_id: string,
 	width: int,
 	height: int,
 	allocator: runtime.Allocator,
 	shaders: hm.Dynamic_Handle_Map(WebGL_Shader, Shader_Handle),
 	vertex_buffer_gpu: gl.Buffer,
-	textures: hm.Dynamic_Handle_Map(WebGL_Texture, Texture_Handle),
+	textures: hm.Dynamic_Handle_Map(WebGL_Texture, Render_Backend_Texture),
 	render_targets: hm.Dynamic_Handle_Map(WebGL_Render_Target, Render_Target_Handle),
 	depth_test: bool,
+	border_wrap_warning_shown: bool,
+	texture_samplers: map[Texture_Sampler]gl.Sampler,
 }
 
 WebGL_Shader_Constant_Buffer :: struct {
@@ -81,10 +79,9 @@ WebGL_Shader_Constant :: struct {
 }
 
 WebGL_Texture :: struct {
-	handle: Texture_Handle,
+	handle: Render_Backend_Texture,
 	id: gl.Texture,
 	format: Pixel_Format,
-	needs_vertical_flip: bool,
 }
 
 WebGL_Texture_Binding :: struct {
@@ -114,29 +111,22 @@ WebGL_Shader :: struct {
 	texture_bindings: []WebGL_Texture_Binding, 
 }
 
-s: ^WebGL_State
-
-webgl_state_size :: proc() -> int {
-	return size_of(WebGL_State)
-}
-
 webgl_init :: proc(
-	state: rawptr,
+	s: ^WebGL_State,
 	glue: ^Window_Render_Glue,
 	swapchain_width: int,
 	swapchain_height: int,
 	options: Init_Options,
 	allocator := context.allocator,
 ) {
-	s = (^WebGL_State)(state)
-
 	// see web_get_window_render_glue
-	canvas_id := (^HTML_Canvas_ID)(glue)^
+	canvas_id := (^Web_HTML_Canvas_ID)(glue)^
 	
 	s.canvas_id = strings.clone(canvas_id, allocator)
 	s.width = swapchain_width
 	s.height = swapchain_height
 	s.allocator = allocator
+	s.texture_samplers = make(map[Texture_Sampler]gl.Sampler, allocator)
 	s.depth_test = options.depth_test
 
 	hm.dynamic_init(&s.shaders, allocator)
@@ -183,17 +173,26 @@ webgl_init :: proc(
 	}
 
 	gl.Viewport(0, 0, i32(s.width), i32(s.height))
+
+	if options.disable_vsync {
+		log.warn("Disabling vsync on the web is not supported.")
+	}
 }
 
-webgl_shutdown :: proc() {
+webgl_shutdown :: proc(s: ^WebGL_State) {
 	gl.DeleteBuffer(s.vertex_buffer_gpu)
+	for _, smp in s.texture_samplers {
+		gl.DeleteSampler(smp)
+	}
+
+	delete(s.texture_samplers)
 	hm.dynamic_destroy(&s.shaders)
 	hm.dynamic_destroy(&s.textures)
 	hm.dynamic_destroy(&s.render_targets)
-	delete_string(s.canvas_id)
+	delete_string(s.canvas_id, s.allocator)
 }
 
-webgl_clear :: proc(render_target: Render_Target_Handle, color: Color) {
+webgl_clear :: proc(s: ^WebGL_State, render_target: Render_Target_Handle, color: Color) {
 	if rt := hm.get(&s.render_targets, render_target); rt != nil {
 		gl.BindFramebuffer(gl.FRAMEBUFFER, rt.framebuffer)
 		gl.Viewport(0, 0, i32(rt.width), i32(rt.height))
@@ -217,11 +216,17 @@ webgl_clear :: proc(render_target: Render_Target_Handle, color: Color) {
 	gl.Clear(clear_mask)
 }
 
-webgl_present :: proc() {
+webgl_present :: proc(s: ^WebGL_State) {
 	// The browser flips the backbuffer for you when 'step' ends
 }
 
-webgl_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
+webgl_set_vsync :: proc(s: ^WebGL_State, enabled: bool) {
+	if enabled == false {
+		log.warn("Disabling vsync on the web is not supported.")
+	}
+}
+
+webgl_draw :: proc(s: ^WebGL_State, vertex_buffer: []u8, draw_calls: []Draw_Call) {
 	if len(vertex_buffer) == 0 || len(draw_calls) == 0 {
 		return
 	}
@@ -258,7 +263,7 @@ webgl_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
 		}
 
 		if .Textures in changed {
-			webgl_bind_textures(call.textures, gl_shd^)
+			webgl_bind_textures(s, call.textures, gl_shd^)
 		}
 
 		// Only the render target and scissor setup need the render target. Skipping the lookup
@@ -395,7 +400,7 @@ webgl_set_constants :: proc(
 	}
 }
 
-webgl_bind_textures :: proc(textures: []Texture_Handle, gl_shd: WebGL_Shader) {
+webgl_bind_textures :: proc(s: ^WebGL_State, textures: []Draw_Call_Texture, gl_shd: WebGL_Shader) {
 	if len(textures) != len(gl_shd.texture_bindings) {
 		return
 	}
@@ -404,8 +409,10 @@ webgl_bind_textures :: proc(textures: []Texture_Handle, gl_shd: WebGL_Shader) {
 		gl_t := gl_shd.texture_bindings[t_idx]
 		gl.ActiveTexture(gl.TEXTURE0 + gl.Enum(t_idx))
 
-		if t := hm.get(&s.textures, t); t != nil {
-			gl.BindTexture(gl.TEXTURE_2D, t.id)
+		gl.BindSampler(gl.Enum(t_idx), webgl_get_texture_sampler(s, t.sampler))
+
+		if tex := hm.get(&s.textures, t.handle); tex != nil {
+			gl.BindTexture(gl.TEXTURE_2D, tex.id)
 		} else {
 			gl.BindTexture(gl.TEXTURE_2D, 0)
 		}
@@ -414,38 +421,34 @@ webgl_bind_textures :: proc(textures: []Texture_Handle, gl_shd: WebGL_Shader) {
 	}
 }
 
-webgl_resize_swapchain :: proc(w, h: int) {
+webgl_resize_swapchain :: proc(s: ^WebGL_State, w, h: int) {
 	s.width = w
 	s.height = h
 	gl.Viewport(0, 0, i32(w), i32(h))
 }
 
-webgl_get_swapchain_width :: proc() -> int {
+webgl_get_swapchain_width :: proc(s: ^WebGL_State) -> int {
 	return s.width
 }
 
-webgl_get_swapchain_height :: proc() -> int {
+webgl_get_swapchain_height :: proc(s: ^WebGL_State) -> int {
 	return s.height
-}
-
-webgl_set_internal_state :: proc(state: rawptr) {
-	s = (^WebGL_State)(state)
 }
 
 // WebGL hands out errors through a queue instead of return values, and nothing else in this backend
 // reads it, so it can hold something an earlier call left behind. Empty it, so that a check right
 // after a call only sees what that call did. The bound stops a lost context spinning here forever.
-GL_ERROR_QUEUE_DRAIN_LIMIT :: 32
+WEBGL_ERROR_QUEUE_DRAIN_LIMIT :: 32
 
-drain_gl_errors :: proc() {
-	for _ in 0..<GL_ERROR_QUEUE_DRAIN_LIMIT {
+webgl_drain_errors :: proc() {
+	for _ in 0..<WEBGL_ERROR_QUEUE_DRAIN_LIMIT {
 		if gl.GetError() == gl.NO_ERROR {
 			return
 		}
 	}
 }
 
-create_texture :: proc(
+_webgl_create_texture :: proc(
 	width: int,
 	height: int,
 	format: Pixel_Format,
@@ -454,14 +457,9 @@ create_texture :: proc(
 	id := gl.CreateTexture()
 	gl.BindTexture(gl.TEXTURE_2D, id)
 
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, i32(gl.CLAMP_TO_EDGE))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, i32(gl.CLAMP_TO_EDGE))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, i32(gl.NEAREST))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, i32(gl.NEAREST))
+	pf := webgl_translate_pixel_format(format)
 
-	pf := gl_translate_pixel_format(format)
-
-	drain_gl_errors()
+	webgl_drain_errors()
 
 	data_size := width*height*pixel_format_size(format)
 	gl.TexImage2D(gl.TEXTURE_2D, 0, pf, i32(width), i32(height), 0, gl.RGBA, gl.UNSIGNED_BYTE, data_size, data)
@@ -481,14 +479,15 @@ create_texture :: proc(
 }
 
 webgl_create_texture :: proc(
+	s: ^WebGL_State,
 	width: int,
 	height: int,
 	format: Pixel_Format,
-) -> (Texture_Handle, bool) {
-	texture, texture_ok := create_texture(width, height, format, nil)
+) -> (Render_Backend_Texture, bool) {
+	texture, texture_ok := _webgl_create_texture(width, height, format, nil)
 
 	if !texture_ok {
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	texture_handle, texture_handle_err := hm.add(&s.textures, texture)
@@ -496,22 +495,23 @@ webgl_create_texture :: proc(
 	if texture_handle_err != nil {
 		log.errorf("Failed adding texture to handle map: %v", texture_handle_err)
 		gl.DeleteTexture(texture.id)
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	return texture_handle, true
 }
 
 webgl_load_texture :: proc(
+	s: ^WebGL_State,
 	data: []u8,
 	width: int,
 	height: int,
 	format: Pixel_Format,
-) -> (Texture_Handle, bool) {
-	texture, texture_ok := create_texture(width, height, format, raw_data(data))
+) -> (Render_Backend_Texture, bool) {
+	texture, texture_ok := _webgl_create_texture(width, height, format, raw_data(data))
 
 	if !texture_ok {
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	texture_handle, texture_handle_err := hm.add(&s.textures, texture)
@@ -519,24 +519,21 @@ webgl_load_texture :: proc(
 	if texture_handle_err != nil {
 		log.errorf("Failed adding texture to handle map: %v", texture_handle_err)
 		gl.DeleteTexture(texture.id)
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	return texture_handle, true
 }
 
 webgl_load_texture_compressed :: proc(
+	s: ^WebGL_State,
 	data: []u8,
 	width: int,
 	height: int,
 	format: Compressed_Texture_Format,
-) -> (Texture_Handle, bool) {
+) -> (Render_Backend_Texture, bool) {
 	id := gl.CreateTexture()
 	gl.BindTexture(gl.TEXTURE_2D, id)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, i32(gl.CLAMP_TO_EDGE))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, i32(gl.CLAMP_TO_EDGE))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, i32(gl.NEAREST))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, i32(gl.NEAREST))
 
 	internal_format: gl.Enum
 	switch format {
@@ -553,12 +550,18 @@ webgl_load_texture_compressed :: proc(
 	if err != nil {
 		gl.DeleteTexture(id)
 		log.errorf("Failed adding compressed texture to handle map: %v", err)
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 	return texture_handle, true
 }
 
-webgl_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect, pitch: int) -> bool {
+webgl_update_texture :: proc(
+	s: ^WebGL_State,
+	th: Render_Backend_Texture,
+	data: []u8,
+	rect: Rect,
+	pitch: int,
+) -> bool {
 	tex := hm.get(&s.textures, th)
 
 	if tex == nil || tex.format == .Unknown {
@@ -572,7 +575,7 @@ webgl_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect, pitch: 
 	return true
 }
 
-webgl_destroy_texture :: proc(th: Texture_Handle) {
+webgl_destroy_texture :: proc(s: ^WebGL_State, th: Render_Backend_Texture) {
 	tex := hm.get(&s.textures, th)
 
 	if tex == nil {
@@ -583,28 +586,17 @@ webgl_destroy_texture :: proc(th: Texture_Handle) {
 	hm.remove(&s.textures, th)
 }
 
-webgl_texture_needs_vertical_flip :: proc(th: Texture_Handle) -> bool {
-	tex := hm.get(&s.textures, th)
-
-	if tex == nil {
-		return false
-	}
-
-	return tex.needs_vertical_flip
-}
-
 webgl_create_render_texture :: proc(
+	s: ^WebGL_State,
 	width: int,
 	height: int,
-) -> (Texture_Handle, Render_Target_Handle, bool) {
-	texture, texture_ok := create_texture(width, height, .RGBA_32_Float, nil)
+) -> (Render_Backend_Texture, Render_Target_Handle, bool) {
+	texture, texture_ok := _webgl_create_texture(width, height, .RGBA_32_Float, nil)
 
 	if !texture_ok {
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, RENDER_TARGET_NONE, false
 	}
 
-	texture.needs_vertical_flip = true
-	
 	framebuffer := gl.CreateFramebuffer()
 	gl.BindFramebuffer(gl.FRAMEBUFFER, framebuffer)
 
@@ -634,7 +626,7 @@ webgl_create_render_texture :: proc(
 			gl.DeleteRenderbuffer(depth_renderbuffer)
 		}
 
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, RENDER_TARGET_NONE, false
 	}
 
 	gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
@@ -658,7 +650,7 @@ webgl_create_render_texture :: proc(
 			gl.DeleteRenderbuffer(depth_renderbuffer)
 		}
 
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, RENDER_TARGET_NONE, false
 	}
 
 	render_target_handle, render_target_handle_err := hm.add(&s.render_targets, rt)
@@ -673,13 +665,13 @@ webgl_create_render_texture :: proc(
 			gl.DeleteRenderbuffer(depth_renderbuffer)
 		}
 
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, RENDER_TARGET_NONE, false
 	}
 
 	return texture_handle, render_target_handle, true
 }
 
-webgl_destroy_render_target :: proc(render_target: Render_Target_Handle) {
+webgl_destroy_render_target :: proc(s: ^WebGL_State, render_target: Render_Target_Handle) {
 	if rt := hm.get(&s.render_targets, render_target); rt != nil {
 		gl.DeleteFramebuffer(rt.framebuffer)
 
@@ -689,38 +681,43 @@ webgl_destroy_render_target :: proc(render_target: Render_Target_Handle) {
 	}
 }
 
-webgl_set_texture_filter :: proc(
-	th: Texture_Handle,
-	scale_down_filter: Texture_Filter,
-	scale_up_filter: Texture_Filter,
-	mip_filter: Texture_Filter,
-) {
-	t := hm.get(&s.textures, th)
-
-	if t == nil {
-		log.error("Trying to set texture filter for invalid texture %v", th)
-		return
+webgl_get_texture_sampler :: proc(s: ^WebGL_State, sampler: Texture_Sampler) -> gl.Sampler {
+	if smp, has_smp := s.texture_samplers[sampler]; has_smp {
+		return smp
 	}
 
-	gl.BindTexture(gl.TEXTURE_2D, t.id)
+	if (sampler.wrap_x == .Border || sampler.wrap_y == .Border) && !s.border_wrap_warning_shown {
+		log.warn("WebGL does not support the Border texture wrap mode. Using Clamp instead.")
+		s.border_wrap_warning_shown = true
+	}
 
-	min_filter := scale_down_filter == .Point ? gl.NEAREST : gl.LINEAR
-	mag_filter := scale_up_filter == .Point ? gl.NEAREST : gl.LINEAR
+	smp := gl.CreateSampler()
 
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, i32(min_filter))
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, i32(mag_filter))
+	min_filter := sampler.scale_down_filter == .Point ? gl.NEAREST : gl.LINEAR
+	mag_filter := sampler.scale_up_filter == .Point ? gl.NEAREST : gl.LINEAR
+
+	gl.SamplerParameteri(smp, gl.TEXTURE_MIN_FILTER, i32(min_filter))
+	gl.SamplerParameteri(smp, gl.TEXTURE_MAG_FILTER, i32(mag_filter))
+
+	webgl_translate_texture_wrap :: proc(wrap: Texture_Wrap) -> i32 {
+		switch wrap {
+		case .Clamp: return i32(gl.CLAMP_TO_EDGE)
+		case .Repeat: return i32(gl.REPEAT)
+		case .Mirrored_Repeat: return i32(gl.MIRRORED_REPEAT)
+		case .Border: return i32(gl.CLAMP_TO_EDGE)
+		}
+
+		return i32(gl.CLAMP_TO_EDGE)
+	}
+
+	gl.SamplerParameteri(smp, gl.TEXTURE_WRAP_S, webgl_translate_texture_wrap(sampler.wrap_x))
+	gl.SamplerParameteri(smp, gl.TEXTURE_WRAP_T, webgl_translate_texture_wrap(sampler.wrap_y))
+
+	s.texture_samplers[sampler] = smp
+	return smp
 }
 
-Shader_Compile_Result_OK :: struct {}
-
-Shader_Compile_Result_Error :: string
-
-Shader_Compile_Result :: union #no_nil {
-	Shader_Compile_Result_OK,
-	Shader_Compile_Result_Error,
-}
-
-compile_shader_from_source :: proc(shader_data: []byte, shader_type: gl.Enum, err_buf: []u8, err_msg: ^string) -> (shader_id: gl.Shader, ok: bool) {
+webgl_compile_shader_from_source :: proc(shader_data: []byte, shader_type: gl.Enum, err_buf: []u8, err_msg: ^string) -> (shader_id: gl.Shader, ok: bool) {
 	shader_id = gl.CreateShader(shader_type)
 	gl.ShaderSource(shader_id, { string(shader_data) })
 	gl.CompileShader(shader_id)
@@ -736,7 +733,7 @@ compile_shader_from_source :: proc(shader_data: []byte, shader_type: gl.Enum, er
 	return shader_id, true
 }
 
-link_shader :: proc(vs_shader: gl.Shader, fs_shader: gl.Shader, err_buf: []u8, err_msg: ^string) -> (program_id: gl.Program, ok: bool) {
+webgl_link_shader :: proc(vs_shader: gl.Shader, fs_shader: gl.Shader, err_buf: []u8, err_msg: ^string) -> (program_id: gl.Program, ok: bool) {
 	program_id = gl.CreateProgram()
 	gl.AttachShader(program_id, vs_shader)
 	gl.AttachShader(program_id, fs_shader)
@@ -754,6 +751,7 @@ link_shader :: proc(vs_shader: gl.Shader, fs_shader: gl.Shader, err_buf: []u8, e
 }
 
 webgl_load_shader :: proc(
+	s: ^WebGL_State,
 	vs_source: []byte,
 	fs_source: []byte,
 	desc_allocator := frame_allocator,
@@ -770,21 +768,21 @@ webgl_load_shader :: proc(
 
 	@static err: [1024]u8
 	err_msg: string
-	vs_shader, vs_shader_ok := compile_shader_from_source(vs_source, gl.VERTEX_SHADER, err[:], &err_msg)
+	vs_shader, vs_shader_ok := webgl_compile_shader_from_source(vs_source, gl.VERTEX_SHADER, err[:], &err_msg)
 
 	if !vs_shader_ok  {
 		log.error(err_msg)
 		return
 	}
 	
-	fs_shader, fs_shader_ok := compile_shader_from_source(fs_source, gl.FRAGMENT_SHADER, err[:], &err_msg)
+	fs_shader, fs_shader_ok := webgl_compile_shader_from_source(fs_source, gl.FRAGMENT_SHADER, err[:], &err_msg)
 
 	if !fs_shader_ok {
 		log.error(err_msg)
 		return
 	}
 
-	program, program_ok := link_shader(vs_shader, fs_shader, err[:], &err_msg)
+	program, program_ok := webgl_link_shader(vs_shader, fs_shader, err[:], &err_msg)
 
 	if !program_ok {
 		log.error(err_msg)
@@ -854,7 +852,7 @@ webgl_load_shader :: proc(
 		input := desc.inputs[idx]
 		format_size := pixel_format_size(input.format)
 		gl.EnableVertexAttribArray(i32(input.register))	
-		format, num_components, norm := gl_describe_pixel_format(input.format)
+		format, num_components, norm := webgl_describe_pixel_format(input.format)
 		gl.VertexAttribPointer(i32(input.register), num_components, format, norm, stride, uintptr(offset))
 		offset += format_size
 	}
@@ -884,7 +882,7 @@ webgl_load_shader :: proc(
 			} else {
 				append(&constant_descs, Shader_Constant_Desc {
 					name = strings.clone(uniform_info.name, desc_allocator),
-					size = uniform_size(uniform_info.type),
+					size = webgl_uniform_size(uniform_info.type),
 				})
 
 				append(&gl_constants, WebGL_Shader_Constant {
@@ -946,7 +944,7 @@ webgl_load_shader :: proc(
 
 				append(&constant_descs, Shader_Constant_Desc {
 					name = uniform_info.name,
-					size = uniform_size(uniform_info.type),
+					size = webgl_uniform_size(uniform_info.type),
 				})
 
 				append(&gl_constants, WebGL_Shader_Constant {
@@ -978,7 +976,7 @@ webgl_load_shader :: proc(
 }
 
 // I might have missed something. But it doesn't seem like GL gives you this information.
-uniform_size :: proc(t: gl.Enum) -> int {
+webgl_uniform_size :: proc(t: gl.Enum) -> int {
 	sz: int
 	switch t {
 	case gl.FLOAT:        sz = 4*1
@@ -1018,7 +1016,7 @@ uniform_size :: proc(t: gl.Enum) -> int {
 	return sz
 }
 
-gl_translate_pixel_format :: proc(f: Pixel_Format) -> gl.Enum {
+webgl_translate_pixel_format :: proc(f: Pixel_Format) -> gl.Enum {
 	switch f {
 	case .RGBA_32_Float: return gl.RGBA
 	case .RGB_32_Float: return gl.RGB
@@ -1040,7 +1038,7 @@ gl_translate_pixel_format :: proc(f: Pixel_Format) -> gl.Enum {
 }
 
 
-gl_describe_pixel_format :: proc(f: Pixel_Format) -> (format: gl.Enum, num_components: int, normalized: bool) {
+webgl_describe_pixel_format :: proc(f: Pixel_Format) -> (format: gl.Enum, num_components: int, normalized: bool) {
 	switch f {
 	case .RGBA_32_Float: return gl.FLOAT, 4, false
 	case .RGB_32_Float: return gl.FLOAT, 3, false
@@ -1059,7 +1057,7 @@ gl_describe_pixel_format :: proc(f: Pixel_Format) -> (format: gl.Enum, num_compo
 	return 0, 0, false
 }
 
-webgl_destroy_shader :: proc(h: Shader_Handle) {
+webgl_destroy_shader :: proc(s: ^WebGL_State, h: Shader_Handle) {
 	shd := hm.get(&s.shaders, h)
 
 	if shd == nil {

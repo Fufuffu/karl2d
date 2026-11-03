@@ -1,13 +1,11 @@
 #+build js
 #+vet explicit-allocators
 #+feature dynamic-literals
-#+private file
+#+private package
 
 package karl2d
 
-@(private="package")
 PLATFORM_WEB :: Platform_Interface {
-	state_size = web_state_size,
 	init = web_init,
 	shutdown = web_shutdown,
 	get_window_render_glue = web_get_window_render_glue,
@@ -21,7 +19,11 @@ PLATFORM_WEB :: Platform_Interface {
 	get_window_position = web_get_position,
 	get_window_scale = web_get_window_scale,
 	set_window_mode = web_set_window_mode,
+	get_window_mode = web_get_window_mode,
 	set_window_icon = web_set_window_icon,
+	get_monitors = web_get_monitors,
+	get_window_monitor = web_get_window_monitor,
+	set_window_monitor = web_set_window_monitor,
 
 	set_cursor_hidden = web_set_cursor_hidden,
 	is_cursor_hidden = web_is_cursor_hidden,
@@ -36,8 +38,6 @@ PLATFORM_WEB :: Platform_Interface {
 	set_gamepad_vibration = web_set_gamepad_vibration,
 
 	open_url = web_open_url,
-
-	set_internal_state = web_set_internal_state,
 }
 
 import "core:sys/wasm/js"
@@ -48,23 +48,22 @@ import "base:runtime"
 import hm "core:container/handle_map"
 import "log"
 import "core:fmt"
+import "core:strings"
+import "core:encoding/endian"
+import "core:hash"
+import "core:slice"
 
 // The link element in index.html that `web_set_window_icon` writes the favicon into.
-FAVICON_ELEMENT_ID :: "karl2d-favicon"
-
-web_state_size :: proc() -> int {
-	return size_of(Web_State)
-}
+WEB_FAVICON_ELEMENT_ID :: "karl2d-favicon"
 
 web_init :: proc(
-	window_state: rawptr,
+	s: ^Web_State,
 	window_width: int,
 	window_height: int,
 	window_title: string,
 	init_options: Init_Options,
 	allocator: runtime.Allocator,
 ) {
-	s = (^Web_State)(window_state)
 	s.allocator = allocator
 	s.events = make([dynamic]Event, allocator)
 	s.key_from_js_event_key_code = make(map[string]Keyboard_Key, allocator)
@@ -76,34 +75,37 @@ web_init :: proc(
 	// The browser window probably has some other size than what was sent in.
 	switch init_options.window_mode {
 	case .Windowed:
-		web_set_screen_size(window_width, window_height)
+		web_set_screen_size(s, window_width, window_height)
 	case .Windowed_Resizable:
-		web_set_screen_size_to_window_size(s.canvas_id)
+		web_set_screen_size_to_window_size(s)
 	case .Borderless_Fullscreen:
 		log.error("Borderless_Fullscreen not implemented on web, but you can make it happen by using Window_Mode.Windowed_Resizable and putting the game in a fullscreen iframe.")
+		web_set_screen_size(s, window_width, window_height)
 	}
 
-	s.window_mode = init_options.window_mode
+	if init_options.window_mode != .Borderless_Fullscreen {
+		s.window_mode = init_options.window_mode
+	}
 
-	add_window_event_listener(.Resize, web_event_window_resize)
+	web_add_window_listener(s, .Resize, web_event_window_resize)
 
 	// One pointer model for mouse, pen and touch. Up sits on the window because a mouse pointer
 	// gets no implicit capture: a drag that ends outside the canvas still has to release. Touch
 	// pointers do get capture, and their events bubble to the window anyway.
-	add_canvas_event_listener(.Pointer_Down, web_event_pointer_down)
-	add_canvas_event_listener(.Pointer_Move, web_event_pointer_move)
-	add_window_event_listener(.Pointer_Up, web_event_pointer_up)
-	add_canvas_event_listener(.Pointer_Cancel, web_event_pointer_cancel)
+	web_add_canvas_listener(s, .Pointer_Down, web_event_pointer_down)
+	web_add_canvas_listener(s, .Pointer_Move, web_event_pointer_move)
+	web_add_window_listener(s, .Pointer_Up, web_event_pointer_up)
+	web_add_canvas_listener(s, .Pointer_Cancel, web_event_pointer_cancel)
 
 	// Not a pointer event, so the wheel keeps its own listener.
-	add_canvas_event_listener(.Wheel, web_event_mouse_wheel)
+	web_add_canvas_listener(s, .Wheel, web_event_mouse_wheel)
 
-	add_window_event_listener(.Key_Down, web_event_key_down)
-	add_window_event_listener(.Key_Up, web_event_key_up)
-	add_window_event_listener(.Focus, web_event_focus)
-	add_window_event_listener(.Blur, web_event_blur)
+	web_add_window_listener(s, .Key_Down, web_event_key_down)
+	web_add_window_listener(s, .Key_Up, web_event_key_up)
+	web_add_window_listener(s, .Focus, web_event_focus)
+	web_add_window_listener(s, .Blur, web_event_blur)
 
-	add_window_event_listener(.Pointer_Lock_Change, _web_event_pointer_lock_change)
+	web_add_window_listener(s, .Pointer_Lock_Change, web_event_pointer_lock_change)
 
 	if init_options.disable_auto_scale_hint {
 		log.warn("disable_auto_scale_hint not supported on web")
@@ -111,7 +113,9 @@ web_init :: proc(
 }
 
 web_event_key_down :: proc(e: js.Event) {
-	key := key_from_js_event(e)
+	s := (^Web_State)(e.user_data)
+
+	key := web_event_key_to_k2key(s, e)
 
 	if key != .None {
 		if e.key.repeat {
@@ -145,29 +149,37 @@ web_event_key_down :: proc(e: js.Event) {
 }
 
 web_event_key_up :: proc(e: js.Event) {
-	key := key_from_js_event(e)
+	s := (^Web_State)(e.user_data)
+
+	key := web_event_key_to_k2key(s, e)
 	append(&s.events, Event_Key_Went_Up {
 		key = key,
 	})
 }
 
 web_event_focus :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	append(&s.events, Event_Window_Focused {})
 }
 
 web_event_blur :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	s.mouse_locked = false
 	append(&s.events, Event_Window_Unfocused {})
 }
 
 web_event_window_resize :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	new_scale := f32(js.device_pixel_ratio())
 
 	// We get a window resize event on DPI scale change. Therefore we can piggyback on this to do
 	// send the event about the DPI changing.
 	if new_scale != s.prev_scale {
 		s.prev_scale = new_scale
-		web_set_screen_size(s.width, s.height)
+		web_set_screen_size(s, s.width, s.height)
 		append(&s.events, Event_Window_Scale_Changed {
 			scale = new_scale,
 			screen_width = s.width,
@@ -176,12 +188,14 @@ web_event_window_resize :: proc(e: js.Event) {
 	}
 
 	if s.window_mode == .Windowed_Resizable {
-		web_set_screen_size_to_window_size(s.canvas_id)
+		web_set_screen_size_to_window_size(s)
 	}
 }
 
 
 web_event_mouse_wheel :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	// Not the best way, but how would we know what the wheel deltaMode really represents? If it is
 	// in pixels, how much "scroll" does that equal to? So we keep the direction and call it one
 	// click. The browser measures down and right as positive, so the vertical axis is flipped.
@@ -203,6 +217,8 @@ web_event_mouse_wheel :: proc(e: js.Event) {
 // mouse. The browser's own post-tap mouse events are not pointer events, so they never reach us
 // and a tap cannot arrive twice.
 web_event_pointer_down :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	if e.mouse.pointer.pointer_type == .Touch {
 		append(&s.events, Event_Touch_Went_Down {
 			id = Touch_Id(e.mouse.pointer.pointer_id),
@@ -227,6 +243,8 @@ web_event_pointer_down :: proc(e: js.Event) {
 }
 
 web_event_pointer_move :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	if e.mouse.pointer.pointer_type == .Touch {
 		append(&s.events, Event_Touch_Moved {
 			id = Touch_Id(e.mouse.pointer.pointer_id),
@@ -253,6 +271,8 @@ web_event_pointer_move :: proc(e: js.Event) {
 }
 
 web_event_pointer_up :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	if e.mouse.pointer.pointer_type == .Touch {
 		append(&s.events, Event_Touch_Went_Up {
 			id = Touch_Id(e.mouse.pointer.pointer_id),
@@ -278,6 +298,8 @@ web_event_pointer_up :: proc(e: js.Event) {
 
 // Only touch is cancelled in practice. A mouse that somehow gets here has no button to release.
 web_event_pointer_cancel :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	if e.mouse.pointer.pointer_type != .Touch {
 		return
 	}
@@ -292,36 +314,40 @@ web_touch_position :: proc(e: js.Event) -> Vec2 {
 	}
 }
 
-add_canvas_event_listener :: proc(evt: js.Event_Kind, callback: proc(e: js.Event)) {
+web_add_canvas_listener :: proc(
+	s: ^Web_State,
+	evt: js.Event_Kind,
+	callback: proc(e: js.Event),
+) {
 	js.add_event_listener(
 		s.canvas_id, 
 		evt, 
-		nil, 
+		s,
 		callback,
 		true,
 	)
 }
 
-add_window_event_listener :: proc(evt: js.Event_Kind, callback: proc(e: js.Event)) {
-	js.add_window_event_listener(evt, nil, callback, true)
+web_add_window_listener :: proc(
+	s: ^Web_State,
+	evt: js.Event_Kind,
+	callback: proc(e: js.Event),
+) {
+	js.add_window_event_listener(evt, s, callback, true)
 }
 
-remove_window_event_listener :: proc(evt: js.Event_Kind, callback: proc(e: js.Event)) {
-	js.remove_window_event_listener(evt, nil, callback, true)
-}
-
-web_set_screen_size_to_window_size :: proc(canvas_id: HTML_Canvas_ID) {
+web_set_screen_size_to_window_size :: proc(s: ^Web_State) {
 	rect := js.get_bounding_client_rect("body")
 	
-	scale := web_get_window_scale()
+	scale := web_get_window_scale(s)
 	s.width = int(f32(rect.width) * scale)
 	s.height = int(f32(rect.height) * scale)
 
-	js.set_element_key_f64(canvas_id, "width", f64(s.width))
-	js.set_element_key_f64(canvas_id, "height", f64(s.height))
+	js.set_element_key_f64(s.canvas_id, "width", f64(s.width))
+	js.set_element_key_f64(s.canvas_id, "height", f64(s.height))
 
-	js.set_element_style(canvas_id, "width", fmt.tprintf("%fpx", f64(rect.width)))
-	js.set_element_style(canvas_id, "height", fmt.tprintf("%fpx", f64(rect.height)))
+	js.set_element_style(s.canvas_id, "width", fmt.tprintf("%fpx", f64(rect.width)))
+	js.set_element_style(s.canvas_id, "height", fmt.tprintf("%fpx", f64(rect.height)))
 
 	append(&s.events, Event_Screen_Resize {
 		width = s.width,
@@ -329,7 +355,7 @@ web_set_screen_size_to_window_size :: proc(canvas_id: HTML_Canvas_ID) {
 	})
 }
 
-web_shutdown :: proc() {
+web_shutdown :: proc(s: ^Web_State) {
 	for it := hm.dynamic_iterator_make(&s.custom_cursors); cd, _ in hm.dynamic_iterate(&it) {
 		delete(cd.data_uri, s.allocator)
 		delete(cd.style_value, s.allocator)
@@ -341,7 +367,7 @@ web_shutdown :: proc() {
 	delete(s.key_from_js_event_key_code)
 }
 
-web_get_window_render_glue :: proc() -> ^Window_Render_Glue {
+web_get_window_render_glue :: proc(s: ^Web_State) -> ^Window_Render_Glue {
 	// We can only use WebGL backend right now, so this is very simple: Just pass a pointer to the 
 	// canvas ID string. 
 	return (^Window_Render_Glue)(&s.canvas_id)
@@ -350,7 +376,7 @@ web_get_window_render_glue :: proc() -> ^Window_Render_Glue {
 // This works for XBox controller -- does it work for PlayStation?
 //
 // The magic numbers are from https://gamepad-tester.net/
-KARL2D_GAMEPAD_BUTTON_FROM_JS :: [Gamepad_Button]int {
+WEB_GAMEPAD_BUTTON_IDX_LOOKUP :: [Gamepad_Button]int {
 	.None = 0,
 	
 	.Left_Face_Up = 12,
@@ -377,10 +403,10 @@ KARL2D_GAMEPAD_BUTTON_FROM_JS :: [Gamepad_Button]int {
 	.Middle_Face_Right = 9, 
 }
 
-web_before_present :: proc() {
+web_before_present :: proc(s: ^Web_State) {
 }
 
-web_get_events :: proc(events: ^[dynamic]Event) {
+web_get_events :: proc(s: ^Web_State, events: ^[dynamic]Event) {
 	append(events, ..s.events[:])
 	runtime.clear(&s.events)
 
@@ -399,7 +425,7 @@ web_get_events :: proc(events: ^[dynamic]Event) {
 		ps := s.gamepad_state[gamepad_idx]
 
 		// We check if any button changed from pressed to not pressed and the other way around.
-		for js_idx, button in KARL2D_GAMEPAD_BUTTON_FROM_JS {
+		for js_idx, button in WEB_GAMEPAD_BUTTON_IDX_LOOKUP {
 			if js_idx == -1 {
 				continue
 			}
@@ -423,33 +449,29 @@ web_get_events :: proc(events: ^[dynamic]Event) {
 	}
 }
 
-web_get_screen_width :: proc() -> int {
+web_get_screen_width :: proc(s: ^Web_State) -> int {
 	return s.width
 }
 
-web_get_screen_height :: proc() -> int {
+web_get_screen_height :: proc(s: ^Web_State) -> int {
 	return s.height
 }
 
-web_clear_events :: proc() {
-	runtime.clear(&s.events)
-}
-
-web_set_window_title :: proc(title: string) {
+web_set_window_title :: proc(s: ^Web_State, title: string) {
 	js.set_document_title(title)
 }
 
-web_set_position :: proc(x: int, y: int) {
+web_set_position :: proc(s: ^Web_State, x: int, y: int) {
 	log.warn("set_window_position not implemented on web")
 }
 
-web_get_position :: proc() -> Vec2 {
+web_get_position :: proc(s: ^Web_State) -> Vec2 {
 	log.warn("get_window_position not implemented on web")
 	return {}
 }
 
-web_set_screen_size :: proc(w, h: int) {
-	scale := web_get_window_scale()
+web_set_screen_size :: proc(s: ^Web_State, w, h: int) {
+	scale := web_get_window_scale(s)
 	s.width = int(f32(w) * scale)
 	s.height = int(f32(h) * scale)
 
@@ -460,11 +482,15 @@ web_set_screen_size :: proc(w, h: int) {
 	js.set_element_style(s.canvas_id, "height", fmt.tprintf("%fpx", f64(h)))
 }
 
-web_get_window_scale :: proc() -> f32 {
+web_get_window_scale :: proc(s: ^Web_State) -> f32 {
 	return f32(js.device_pixel_ratio())
 }
 
-web_set_window_mode :: proc(new_mode: Window_Mode) {
+web_get_window_mode :: proc(s: ^Web_State) -> Window_Mode {
+	return s.window_mode
+}
+
+web_set_window_mode :: proc(s: ^Web_State, new_mode: Window_Mode) {
 	if new_mode == .Borderless_Fullscreen {
 		log.error("Borderless_Fullscreen not implemented on web, but you can make it happen by using Window_Mode.Windowed_Resizable and putting the game in a fullscreen iframe.")
 		return
@@ -474,62 +500,229 @@ web_set_window_mode :: proc(new_mode: Window_Mode) {
 	s.window_mode = new_mode
 
 	if new_mode == .Windowed_Resizable && old_mode == .Windowed {
-		web_set_screen_size_to_window_size(s.canvas_id)
+		web_set_screen_size_to_window_size(s)
 	} else if new_mode == .Windowed && old_mode == .Windowed_Resizable {
-		web_set_screen_size(s.width, s.height)
+		web_set_screen_size(s, s.width, s.height)
 	}
 }
 
-// Makes a data URI out of an image, for handing it to the DOM through a string property.
-// core:image/png can only decode, not encode, so the image goes through our own `encode_png`; see
-// that proc's comment for why its uncompressed output is fine here.
-web_png_data_uri :: proc(image: Image, allocator: runtime.Allocator) -> (string, bool) {
-	png_bytes, encode_ok := encode_png(image, frame_allocator)
-
-	if !encode_ok {
+// For making a URI that contains a whole PNG. It is made from an `Image` using a minimal PNG
+// encoder. Used to create web icons and cursors.
+web_encode_png_uri_from_image :: proc(img: Image, allocator: runtime.Allocator) -> (string, bool) {
+	if img.width <= 0 || img.height <= 0 {
 		log.error("Failed encoding image as PNG")
 		return "", false
 	}
 
+	if len(img.pixels) != img.width*img.height {
+		log.error("Failed encoding image as PNG")
+		return "", false
+	}
+
+	stride := img.width*4 // 4 bytes per pixel
+	row_size := 1 + stride  // 1 byte extra for PNG filter. Filter is always 0, but must be there.
+	raw_size := img.height*row_size
+	STORED_BLOCK_MAX :: 65535
+	rows_per_block := STORED_BLOCK_MAX/row_size
+
+	if rows_per_block == 0 {
+		// This only happens for images wider than 16383 pixels, which no cursor will be.
+		log.error("Failed encoding image as PNG")
+		return "", false
+	}
+
+	num_blocks := (img.height + rows_per_block - 1)/rows_per_block
+
+	// zlib stream = 2-byte header + stored deflate blocks + 4-byte big-endian Adler-32 of the
+	// scanline data.
+	idat_data_len := 2 + num_blocks*5 + raw_size + 4
+	idat_chunk_len := 4 + 4 + idat_data_len + 4
+
+	SIGNATURE_LEN :: 8
+	IHDR_CHUNK_LEN :: 4 + 4 + 13 + 4
+	IEND_CHUNK_LEN :: 4 + 4 + 0 + 4
+
+	total_size := SIGNATURE_LEN + IHDR_CHUNK_LEN + idat_chunk_len + IEND_CHUNK_LEN
+
+	out := make([]u8, total_size, frame_allocator)
+	pos := 0
+
+	copy(out[pos:], []u8{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A})
+	pos += SIGNATURE_LEN
+
+	// IHDR (header)
+	{
+		endian.put_u32(out[pos:], .Big, 13)
+		pos += 4
+
+		crc_start := pos
+		copy(out[pos:], []u8{'I', 'H', 'D', 'R'})
+		pos += 4
+
+		endian.put_u32(out[pos:], .Big, u32(img.width))
+		pos += 4
+		endian.put_u32(out[pos:], .Big, u32(img.height))
+		pos += 4
+
+		out[pos] = 8 // bit depth
+		pos += 1
+		out[pos] = 6 // color type: truecolor with alpha (RGBA)
+		pos += 1
+		out[pos] = 0 // compression method: deflate (the only one PNG defines)
+		pos += 1
+		out[pos] = 0 // filter method: adaptive (the only one PNG defines)
+		pos += 1
+		out[pos] = 0 // interlace method: none
+		pos += 1
+
+		endian.put_u32(out[pos:], .Big, hash.crc32(out[crc_start:pos]))
+		pos += 4
+	}
+
+	// IDAT (data)
+	{
+		endian.put_u32(out[pos:], .Big, u32(idat_data_len))
+		pos += 4
+
+		crc_start := pos
+		copy(out[pos:], []u8{'I', 'D', 'A', 'T'})
+		pos += 4
+
+		// zlib header: CMF=0x78 (deflate, 32K window), FLG=0x01 (no preset dictionary, chosen so
+		// that CMF*256 + FLG is a multiple of 31, as the zlib format requires).
+		out[pos] = 0x78
+		out[pos + 1] = 0x01
+		pos += 2
+
+		adler := u32(1)
+		row := 0
+
+		for row < img.height {
+			block_rows := min(rows_per_block, img.height - row)
+			block_size := block_rows*row_size
+			is_final := row + block_rows >= img.height
+
+			out[pos] = is_final ? 1 : 0 // BFINAL in bit 0, BTYPE (00 = stored) in bits 1-2
+			pos += 1
+
+			len16 := u16(block_size)
+			endian.put_u16(out[pos:], .Little, len16)
+			pos += 2
+			endian.put_u16(out[pos:], .Little, ~len16)
+			pos += 2
+
+			block_start := pos
+
+			for _ in 0..<block_rows {
+				out[pos] = 0 // filter type: none
+				pos += 1
+
+				row_pixels := img.pixels[row*img.width:(row + 1)*img.width]
+				copy(out[pos:], slice.reinterpret([]u8, row_pixels))
+				pos += stride
+
+				row += 1
+			}
+
+			adler = hash.adler32(out[block_start:pos], adler)
+		}
+
+		endian.put_u32(out[pos:], .Big, adler)
+		pos += 4
+
+		endian.put_u32(out[pos:], .Big, hash.crc32(out[crc_start:pos]))
+		pos += 4
+	}
+
+	// IEND
+	{
+		endian.put_u32(out[pos:], .Big, 0)
+		pos += 4
+
+		crc_start := pos
+		copy(out[pos:], []u8{'I', 'E', 'N', 'D'})
+		pos += 4
+
+		endian.put_u32(out[pos:], .Big, hash.crc32(out[crc_start:pos]))
+		pos += 4
+	}
+
 	// The base64 is copied into the data URI below, so it is not needed after that.
-	pixels_b64 := base64.encode(png_bytes, allocator = frame_allocator)
+	pixels_b64 := base64.encode(out, allocator = frame_allocator)
 	return fmt.aprintf("data:image/png;base64,%v", pixels_b64, allocator = allocator), true
 }
 
 // A page has no window icon, so this sets the favicon instead, as a PNG data URI. Needs the
 // `karl2d-favicon` link element that the `build_web` template puts in `index.html`.
-web_set_window_icon :: proc(image: Image) -> bool {
+web_set_window_icon :: proc(s: ^Web_State, image: Image) -> bool {
 	// Every element that exists has its own id as the value of its `id` property, so a zero length
 	// means there is no such element.
-	if js.get_element_key_string_length(FAVICON_ELEMENT_ID, "id") == 0 {
+	if js.get_element_key_string_length(WEB_FAVICON_ELEMENT_ID, "id") == 0 {
 		return false
 	}
 
-	data_uri, data_uri_ok := web_png_data_uri(image, frame_allocator)
+	data_uri, data_uri_ok := web_encode_png_uri_from_image(image, frame_allocator)
 
 	if !data_uri_ok {
 		return false
 	}
 
-	js.set_element_key_string(FAVICON_ELEMENT_ID, "href", data_uri)
+	js.set_element_key_string(WEB_FAVICON_ELEMENT_ID, "href", data_uri)
 	return true
 }
 
-web_set_cursor_hidden :: proc(hidden: bool) {
-	s.cursor_hidden = hidden
-	web_apply_cursor()
+WEB_MONITOR_ID :: Monitor_Id(1)
+
+web_get_monitors :: proc(_: ^Web_State, allocator: runtime.Allocator) -> []Monitor_Info {
+	js.evaluate(
+		"var karl2d_el = document.getElementById('webgl-canvas'); " +
+		"karl2d_el._screenWidth = window.screen.width; " +
+		"karl2d_el._screenHeight = window.screen.height;",
+	)
+
+	scale := js.device_pixel_ratio()
+	width := js.get_element_key_f64("webgl-canvas", "_screenWidth") * scale
+	height := js.get_element_key_f64("webgl-canvas", "_screenHeight") * scale
+	monitors := make([]Monitor_Info, 1, allocator)
+
+	monitors[0] = {
+		id = WEB_MONITOR_ID,
+		name = strings.clone("Browser Screen", allocator),
+		size = {int(width), int(height)},
+		scale = f32(scale),
+		primary = true,
+	}
+
+	return monitors
 }
 
-web_is_cursor_hidden :: proc() -> bool {
+web_get_window_monitor :: proc(s: ^Web_State) -> Monitor_Id {
+	return WEB_MONITOR_ID
+}
+
+web_set_window_monitor :: proc(s: ^Web_State, monitor: Monitor_Id) {
+	if monitor != WEB_MONITOR_ID {
+		log.errorf("Cannot move window to monitor %v, it does not exist.", monitor)
+	}
+}
+
+web_set_cursor_hidden :: proc(s: ^Web_State, hidden: bool) {
+	s.cursor_hidden = hidden
+	web_apply_cursor(s)
+}
+
+web_is_cursor_hidden :: proc(s: ^Web_State) -> bool {
 	return s.cursor_hidden
 }
 
-_web_event_pointer_lock_change :: proc(e: js.Event) {
+web_event_pointer_lock_change :: proc(e: js.Event) {
+	s := (^Web_State)(e.user_data)
+
 	js.evaluate("document.getElementById('webgl-canvas')._pointerLocked = document.pointerLockElement !== null ? 1 : 0")
 	s.mouse_locked = js.get_element_key_f64("webgl-canvas", "_pointerLocked") != 0
 }
 
-web_set_mouse_locked :: proc(locked: bool) {
+web_set_mouse_locked :: proc(s: ^Web_State, locked: bool) {
 	if locked {
 		js.evaluate("document.getElementById('webgl-canvas').requestPointerLock()")
 		cx := f32(s.width / 2)
@@ -539,24 +732,31 @@ web_set_mouse_locked :: proc(locked: bool) {
 		js.evaluate("document.exitPointerLock()")
 	}
 
-	// s.mouse_locked set by _web_event_pointer_lock_change
+	// s.mouse_locked set by web_event_pointer_lock_change
 }
 
-web_is_mouse_locked :: proc() -> bool {
+web_is_mouse_locked :: proc(s: ^Web_State) -> bool {
 	return s.mouse_locked
 }
 
-web_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) {
+web_create_custom_cursor :: proc(
+	s: ^Web_State,
+	image: Image,
+	hotspot: [2]int,
+) -> (
+	Custom_Cursor,
+	bool,
+) {
 	// There is no hardware cursor API on the web, so we hand the browser a PNG as a data URI and
 	// let CSS do the work.
-	data_uri, data_uri_ok := web_png_data_uri(image, s.allocator)
+	data_uri, data_uri_ok := web_encode_png_uri_from_image(image, s.allocator)
 	if !data_uri_ok {
 		return {}, false
 	}
 
 	// Browsers cap `cursor` images at 128 CSS pixels; anything bigger is either clamped or, in
 	// Firefox, ignored entirely and silently replaced with the default cursor.
-	scale := web_get_window_scale()
+	scale := web_get_window_scale(s)
 	if f32(image.width)/scale > 128 || f32(image.height)/scale > 128 {
 		log.warnf(
 			"Cursor image is %vx%v physical pixels, which is %.0fx%.0f CSS pixels at the current " +
@@ -570,7 +770,7 @@ web_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Curso
 
 	cursor := Web_Cursor{hotspot = hotspot}
 	cursor.data_uri = data_uri
-	web_build_cursor_style(&cursor)
+	web_build_cursor_style(s, &cursor)
 
 	handle, add_err := hm.add(&s.custom_cursors, cursor)
 
@@ -592,11 +792,11 @@ web_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Curso
 // `image-set` fixes that by telling the browser the image has `scale` device pixels per CSS pixel,
 // which both scales it down and keeps it crisp. The hotspot is in CSS pixels too, so it is scaled
 // to match. We keep the plain `url` value around as a fallback, see `web_set_cursor`.
-web_build_cursor_style :: proc(cursor: ^Web_Cursor) {
+web_build_cursor_style :: proc(s: ^Web_State, cursor: ^Web_Cursor) {
 	delete(cursor.style_value, s.allocator)
 	delete(cursor.style_value_scaled, s.allocator)
 
-	scale := web_get_window_scale()
+	scale := web_get_window_scale(s)
 
 	cursor.style_value = fmt.aprintf(
 		"url(%v) %v %v, auto",
@@ -615,7 +815,7 @@ web_build_cursor_style :: proc(cursor: ^Web_Cursor) {
 	cursor.built_for_scale = scale
 }
 
-web_set_cursor :: proc(cursor: Cursor) {
+web_set_cursor :: proc(s: ^Web_State, cursor: Cursor) {
 	// Reject a stale handle, so a programming error leaves the cursor alone.
 	if c, is_custom := cursor.(Custom_Cursor); is_custom {
 		if hm.get(&s.custom_cursors, c) == nil {
@@ -625,7 +825,7 @@ web_set_cursor :: proc(cursor: Cursor) {
 	}
 
 	s.current_cursor = cursor
-	web_apply_cursor()
+	web_apply_cursor(s)
 }
 
 web_standard_cursor_keyword :: proc(cursor: Standard_Cursor) -> string {
@@ -649,7 +849,7 @@ web_standard_cursor_keyword :: proc(cursor: Standard_Cursor) -> string {
 
 // Applies s.cursor_hidden and s.current_cursor to the canvas. The two share the same CSS `cursor`
 // property, so every entry point goes through this.
-web_apply_cursor :: proc() {
+web_apply_cursor :: proc(s: ^Web_State) {
 	if s.cursor_hidden {
 		js.set_element_style(s.canvas_id, "cursor", "none")
 		s.applied_cursor = nil
@@ -671,10 +871,10 @@ web_apply_cursor :: proc() {
 			return
 		}
 
-		scale := web_get_window_scale()
+		scale := web_get_window_scale(s)
 
 		if cd.built_for_scale != scale {
-			web_build_cursor_style(cd)
+			web_build_cursor_style(s, cd)
 		}
 
 		// The data URI is tens of kilobytes and games tend to set the cursor every frame, so don't
@@ -693,7 +893,7 @@ web_apply_cursor :: proc() {
 	}
 }
 
-web_destroy_custom_cursor :: proc(custom_cursor: Custom_Cursor) {
+web_destroy_custom_cursor :: proc(s: ^Web_State, custom_cursor: Custom_Cursor) {
 	cd := hm.get(&s.custom_cursors, custom_cursor)
 
 	if cd == nil {
@@ -710,10 +910,10 @@ web_destroy_custom_cursor :: proc(custom_cursor: Custom_Cursor) {
 	hm.remove(&s.custom_cursors, custom_cursor)
 
 	// Falls back to the default if that was the cursor on screen.
-	web_apply_cursor()
+	web_apply_cursor(s)
 }
 
-web_is_gamepad_active :: proc(gamepad: int) -> bool {
+web_is_gamepad_active :: proc(s: ^Web_State, gamepad: int) -> bool {
 	if gamepad < 0 || gamepad >= MAX_GAMEPADS {
 		return false
 	}
@@ -721,17 +921,17 @@ web_is_gamepad_active :: proc(gamepad: int) -> bool {
 	return s.gamepad_state[gamepad].connected
 }
 
-web_get_gamepad_axis :: proc(gamepad: int, axis: Gamepad_Axis) -> f32 {
+web_get_gamepad_axis :: proc(s: ^Web_State, gamepad: int, axis: Gamepad_Axis) -> f32 {
 	if gamepad < 0 || gamepad >= MAX_GAMEPADS {
 		return 0
 	}
 
 	if axis == .Left_Trigger {
-		return f32(s.gamepad_state[gamepad].buttons[KARL2D_GAMEPAD_BUTTON_FROM_JS[.Left_Trigger]].value)
+		return f32(s.gamepad_state[gamepad].buttons[WEB_GAMEPAD_BUTTON_IDX_LOOKUP[.Left_Trigger]].value)
 	}
 
 	if axis == .Right_Trigger {
-		return f32(s.gamepad_state[gamepad].buttons[KARL2D_GAMEPAD_BUTTON_FROM_JS[.Right_Trigger]].value)
+		return f32(s.gamepad_state[gamepad].buttons[WEB_GAMEPAD_BUTTON_IDX_LOOKUP[.Right_Trigger]].value)
 	}
 
 	js_axis: int
@@ -749,28 +949,23 @@ web_get_gamepad_axis :: proc(gamepad: int, axis: Gamepad_Axis) -> f32 {
 	return f32(s.gamepad_state[gamepad].axes[js_axis])
 }
 
-web_set_gamepad_vibration :: proc(gamepad: int, left: f32, right: f32) {
+web_set_gamepad_vibration :: proc(s: ^Web_State, gamepad: int, left: f32, right: f32) {
 	if gamepad < 0 || gamepad >= MAX_GAMEPADS {
 		return
 	}
 }
 
-web_open_url :: proc(url: string) -> bool {
+web_open_url :: proc(s: ^Web_State, url: string) -> bool {
 	js.open(url)
 	return true
 }
 
-web_set_internal_state :: proc(state: rawptr) {
-	assert(state != nil)
-	s = (^Web_State)(state)
-}
-
-@(private="package")
-HTML_Canvas_ID :: string
+Web_HTML_Canvas_ID :: string
 
 Web_State :: struct {
+	using _: Platform_State,
 	allocator: runtime.Allocator,
-	canvas_id: HTML_Canvas_ID,
+	canvas_id: Web_HTML_Canvas_ID,
 	width: int,
 	height: int,
 	prev_scale: f32,
@@ -805,9 +1000,7 @@ Web_Cursor :: struct {
 	built_for_scale: f32,
 }
 
-s: ^Web_State
-
-key_from_js_event :: proc(e: js.Event) -> Keyboard_Key {
+web_event_key_to_k2key :: proc(s: ^Web_State, e: js.Event) -> Keyboard_Key {
 	if len(s.key_from_js_event_key_code) == 0 {
 		context.allocator = s.allocator
 		s.key_from_js_event_key_code = {

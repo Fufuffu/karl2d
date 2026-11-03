@@ -21,10 +21,6 @@ package karl2d
 // frame. For single frame allocations the library uses an internal "frame allocator".
 // The frame allocator is cleared when `update()` runs.
 //
-// Call `init` before using Karl2D procedures that depend on runtime state, such as window,
-// drawing, input, audio, texture, font and shader procedures. Pure helper procedures, types and
-// constants can be used before `init`.
-//
 // The return value is a pointer to Karl2D's internal state. You can restore this state later using
 // `set_internal_state()`. This is useful when doing hot reload, as the internal state pointer gets
 // reset when the library is reloaded. You can safely ignore the return value if you have no such
@@ -32,6 +28,10 @@ package karl2d
 //
 // THREAD INFO: The value of `audio_thread_logger` will be stored for later use by the audio thread.
 // Make sure your logger is thread safe (the file/console loggers in Odin are).
+//
+// WARNING: Many procedures in Karl2D assume that this procedure has already been run. To be on the
+// safe side, don't use any Karl2D procedures before running `init`. The only exception is
+// `get_monitors`: It is guaranteed to be possible to call ahead of `init`.
 init :: proc(
 	screen_width: int,
 	screen_height: int,
@@ -103,6 +103,9 @@ calculate_frame_time :: proc()
 // called a "backbuffer". This makes sure that we don't see half-drawn frames. So when you are happy
 // with a frame and want to show it to the player, call this procedure.
 //
+// The FPS limit set using `set_fps_limit` is implemented in this procedure. It will use a
+// combination of sleeps and busy looping to get to the target framerate. 
+//
 // WebGL note: WebGL does the backbuffer flipping automatically. But you should still call this to
 // make sure that all rendering has been sent off to the GPU (as it calls `draw_current_batch()`).
 present :: proc()
@@ -136,6 +139,26 @@ get_frame_time :: proc() -> f32
 //
 // This value is updated when `calculate_frame_time()` runs (which is also called by `update()`).
 get_time :: proc() -> f64
+
+// Enable or disable vertical sync. When `present` runs, vertical sync makes the game wait until the
+// screen has refreshed. This avoids any "tearing" where you see two frames at once. Vertical sync
+// effectively limits the framerate of your game to the refresh rate of your monitor.
+//
+// Vertical sync is enabled by default. It can be disabled when `init` is called using
+// `options.disable_vsync = true`.
+//
+// WEB: Vertical sync is not possible to disable.
+set_vsync :: proc(enabled: bool)
+
+// Limit the game to not running any faster than a certain number of frames per second. Set `0` to
+// disable FPS limit. The FPS limit is disabled by default. It can be set during `init` using
+// `options.fps_limit`.
+//
+// The FPS limit is implemented by sleeping inside `k2.present()`. Since sleeps are not exact, it
+// will sleep within 2 milliseconds of the target time and then "busy loop" the last 2 milliseconds.
+//
+// WEB: FPS limit is not available.
+set_fps_limit :: proc(fps: int)
 
 // Resize the drawing area of the window (the screen) to a new size. While the user cannot resize
 // windows with `window_mode == .Windowed_Resizable`, this procedure is able to resize such windows.
@@ -173,6 +196,28 @@ get_window_scale :: proc() -> f32
 
 // Use to change between windowed mode, resizable windowed mode and fullscreen
 set_window_mode :: proc(window_mode: Window_Mode)
+
+// Fetch the most recent window mode, set by either `init` or `set_window_mode`.
+get_window_mode :: proc() -> Window_Mode
+
+// SPECIAL PROC: Can be used before `k2.init` has been executed.
+//
+// Get a list of all currently connected monitors. The `id` on each `Monitor_Info` can be used with
+// `set_window_monitor`.
+//
+// Note the allocator parameter: The returned slice is allocated and also contains `name` fields
+// that are allocated.
+get_monitors :: proc(allocator := context.allocator) -> []Monitor_Info
+
+// Get the ID of the monitor that the game is currently displayed on. If the window spans several
+// monitors, then the one it overlaps the most is used.
+get_window_monitor :: proc() -> Monitor_Id
+
+// Move the window to some monitor. If the game is running in fullscreen, then the fullscreen window
+// will be moved and properly resized.
+//
+// Get a list of all monitors using `get_monitors`.
+set_window_monitor :: proc(monitor: Monitor_Id)
 
 // Sets the icon shown in the titlebar and the OS's program switcher bar. Load the image using for
 // example `k2.load_image_from_file`.
@@ -550,52 +595,125 @@ load_image_from_bytes :: proc(bytes: []u8) -> (Image, bool) #optional_ok
 // Destroy an image previously loaded using `load_image_from_file` or `load_image_from_bytes`.
 destroy_image :: proc(img: Image)
 
+// Returns true if the texture is alive and possible to use. `TEXTURE_NONE` or a destroyed texture
+// will return `false`.
+is_texture_valid :: proc(texture: Texture) -> bool
+
 // Get a rectangle that spans the whole texture. Coordinates will be (x, y) = (0, 0) and size
-// (w, h) = (texture_width, texture_height)
-get_texture_rect :: proc(t: Texture) -> Rect
+// (w, h) = (texture_width, texture_height).
+//
+// Returns a zeroed rect for invalid textures. For invalid textures that are not TEXTURE_NONE, an
+// error is logged.
+get_texture_rect :: proc(texture: Texture) -> Rect
+
+// Get the pixel width of a texture.
+//
+// Returns a zero width for invalid textures. For invalid textures that are not TEXTURE_NONE, an
+// error is logged.
+get_texture_width :: proc(texture: Texture) -> int
+
+// Get the pixel height of a texture.
+//
+// Returns a zero height for invalid textures. For invalid textures that are not TEXTURE_NONE, an
+// error is logged.
+get_texture_height :: proc(texture: Texture) -> int
+
+// Get the (width, height) of a texture, as a Vec2.
+//
+// Note that while `get_texture_width/height` returns `int`, while this procedure returns `Vec2`,
+// which is `[2]f32`. In other words, this procedure gives floats instead of ints.
+//
+// Returns a zero Vec2 for invalid textures. For invalid textures that are not TEXTURE_NONE, an
+// error is logged.
+get_texture_size :: proc(texture: Texture) -> Vec2
 
 // Update a texture with new pixels. `bytes` is the new pixel data. `rect` is the rectangle in
-// `tex` where the new pixels should end up. `pitch` is the number of bytes between the start of two
-// rows, the default of `0` means that the rows are tightly packed.
-update_texture :: proc(tex: Texture, bytes: []u8, rect: Rect, pitch := 0) -> bool
+// `texture` where the new pixels should end up. `pitch` is the number of bytes between the start of
+// two rows, the default of `0` means that the rows are tightly packed.
+update_texture :: proc(texture: Texture, bytes: []u8, rect: Rect, pitch := 0) -> bool
 
 // Destroy a texture, freeing up any memory it has used on the GPU.
-destroy_texture :: proc(tex: Texture)
+destroy_texture :: proc(texture: Texture)
 
 // Controls how a texture should be filtered. You can choose "point" or "linear" filtering. Which
-// means "pixly" or "smooth". This filter will be used for up and down-scaling as well as for
-// mipmap sampling. Use `set_texture_filter_ex` if you need to control these settings separately.
+// means "pixly" or "smooth". This filter will be used for up and down-scaling. If you want to
+// control up and down-scaling separately, then use `set_texture_sampler`.
 set_texture_filter :: proc(t: Texture, filter: Texture_Filter)
 
-// Controls how a texture should be filtered. `scale_down_filter` and `scale_up_filter` controls how
-// the texture is filtered when we render the texture at a smaller or larger size.
-// `mip_filter` controls how the texture is filtered when it is sampled using _mipmapping_.
+// The the texture wrap mode of the texture. This controls what happens if you try to draw pixels
+// from an area that falls outside the texture. For example, if you supply a `source` rect to the
+// `draw_texture_rect` procedure that is bigger than the texture, then the wrapping mode decides how
+// that is handled.
 //
-// TODO: Add mipmapping generation controls for texture and refer to it from here.
-set_texture_filter_ex :: proc(
-	t: Texture,
-	scale_down_filter: Texture_Filter,
-	scale_up_filter: Texture_Filter,
-	mip_filter: Texture_Filter,
-)
+// This sets the same texture wrap mode in both the X and Y direction of the texture. If you use the
+// more advanced `set_texture_sampler` procedure, then you can control the directions separately.
+set_texture_wrap :: proc(texture: Texture, wrap: Texture_Wrap)
+
+// Set the sampler to use for this texture. The sampler contains information about how to filter and
+// wrap the texture. Any `draw_texture_*` calls after this will use these settings. You can change
+// the settings after a `draw_texture_*` call, the sampler is copied into the queued draw call.
+//
+// This is an "advanced" version of `set_texture_filter` and `set_texture_wrap`. Using it you can
+// set wrap settings in x and y direction separately. You can also set filtering options for both
+// scaling up and scaling down.
+//
+// Pass `nil` to make the texture use the default sampler, see `set_default_texture_sampler`.
+set_texture_sampler :: proc(texture: Texture, sampler: Maybe(Texture_Sampler))
+
+// Returns the sampler a texture would use if it was drawn right now.
+get_texture_sampler :: proc(texture: Texture) -> Texture_Sampler
+
+// Set the default texture sampler that is used when the sampler of a texture hasn't been overridden
+// using `set_texture_filter`, `set_texture_wrap` or `set_texture_sampler`.
+//
+// If you run `set_texture_sampler(tex, nil)`, then the texture will use this sampler.
+set_default_texture_sampler :: proc(sampler: Texture_Sampler)
+
+// Return the default texture sampler. It gets a default value during `init`, but may after that
+// have been changed using `set_default_texture_sampler`.
+get_default_texture_sampler :: proc() -> Texture_Sampler
 
 //-------//
 // AUDIO //
 //-------//
 
-// Play an audio clip with the supplied initial settings. The return value is a `Sound`, which means
-// something that is currently playing in the audio mixer. You can use the returned `Sound` with
-// `set_sound_volume`, `stop_sound` etc in order to control the playback. Ignore the return value
-// if you just want to start the sound and never touch it again.
-//
-// Audio clips are loaded using `load_audio_clip_from_file`, `load_audio_clip_from_bytes` and
-// `load_audio_clip_from_bytes_raw`.
+// Play an audio clip with the supplied settings. Audio clips are loaded using
+// `load_audio_clip_from_file`, `load_audio_clip_from_bytes` and `load_audio_clip_from_bytes_raw`.
 //
 // Pass `bus` to play the sound on an audio bus. It plays on the master bus by default.
 //
-// Warning: If you pass `loop = true` and don't save the return value anywhere, then you've started
-// a sound you cannot stop.
+// This is for "fire-and-forget" type of sounds that you do not need to control after they have
+// started. The audio clip will play until it ends. If you need control as the clip plays, then use
+// `create_sound`, `play_sound` and the other `set_sound_xxx` procedures to control it.
+//
+// You cannot loop audio clips using this procedure, since you would have no way to stop them. For
+// looping audio clips, use a Sound.
 play_audio_clip :: proc(
+	clip: Audio_Clip,
+	volume: f32 = 1,
+	pan: f32 = 0,
+	pitch: f32 = 1,
+	bus: Audio_Bus = AUDIO_BUS_MASTER,
+)
+
+// Returns how many seconds long this audio clip is. Returns `0` if the audio clip has been
+// destroyed.
+get_audio_clip_duration :: proc(clip: Audio_Clip) -> f32
+
+// How many playing instances there are of this clip. Useful for limiting how many overlapping
+// sounds you start from the same clip. This counts playback started both using `play_audio_clip`
+// and `play_sound`. Paused sounds are also included, this procedures counts how many times an audio
+// clip is referenced in the mixer.
+count_audio_clip_instances :: proc(clip: Audio_Clip) -> int
+
+// Create a `Sound` from an `Audio_Clip` using supplied settings. A Sound is a persistent thing that
+// can be used to modify the playback settings of an audio clip as it is playing. It can also be
+// used to loop audio clips. Sounds remember the settings you set on them, both when playing and not
+// playing.
+//
+// Start playing the Sound using `play_sound`. Destroy the Sound using `destroy_sound` when you no
+// longer need it. There are procedures named `set_sound_xxx` to control the settings of the sound.
+create_sound :: proc(
 	clip: Audio_Clip,
 	volume: f32 = 1,
 	pan: f32 = 0,
@@ -604,62 +722,81 @@ play_audio_clip :: proc(
 	bus: Audio_Bus = AUDIO_BUS_MASTER,
 ) -> Sound
 
-// Stops the sound, which destroys its playback state in the mixer. For a `Sound` started using
-// `play_audio_stream`, this also rewinds the stream to the start. Use `set_sound_paused` to pause
-// the Sound instead, which won't lose the current playback position and settings.
+// Destroy a Sound previously created using `create_sound`. This does not destroy the Audio_Clip
+// that was used to create the Sound.
+//
+// Note: Running `destroy_audio_clip` will destroy all sounds that reference that audio clip.
+destroy_sound :: proc(sound: Sound)
+
+// Play a Sound. It will be played with the settings of the sound. The settings come from both 
+// `create_sound` as well as any changes that come from `set_sound_xxx`.
+//
+// A Sound that is already playing will restart.
+play_sound :: proc(sound: Sound)
+
+// Stop a playing Sound. This will remove its playback state from the mixer. It'll remember the last
+// settings it was played with for when `play_sound` runs again.
 stop_sound :: proc(sound: Sound)
 
-// Pause or unpause a sound. A paused sound keeps its position and stays valid until it is unpaused
-// or stopped.
-set_sound_paused :: proc(sound: Sound, paused: bool)
+// Pauses a playing sound. Use `play_sound` to resume. You can check the paused state using
+// `sound_is_paused`, or check if a sound is playing and non-paused using `sound_is_playing`.
+pause_sound :: proc(sound: Sound)
 
-// Returns true if the sound exists and is not paused.
+// Returns true if the sound is playing. Returns false if the sound is paused.
 sound_is_playing :: proc(sound: Sound) -> bool
 
-// Returns true if the sound still exists. Both playing and paused sounds are valid. A finished or
-// stopped sound is not.
-sound_is_valid :: proc(sound: Sound) -> bool
+// Returns true if the sound is currently playing, but it is in a paused state.
+sound_is_paused :: proc(sound: Sound) -> bool
 
 // Set the volume of a sound. Range: 0 to 1.
+//
+// Affects a playing Sound, but is also remembered for the next time the sound is played.
 set_sound_volume :: proc(sound: Sound, volume: f32)
 
 // Set the pan of a sound. Range: -1 to 1, where -1 is full left, 0 is center and 1 is full right.
+//
+// Affects a playing Sound, but is also remembered for the next time the sound is played.
 set_sound_pan :: proc(sound: Sound, pan: f32)
 
 // Set the pitch of a sound. Range: 0.01 and up, where 1 is the default. Pitch 2 makes the sound
 // play twice as fast, which also makes it sound higher pitched.
+//
+// Affects a playing Sound, but is also remembered for the next time the sound is played.
 set_sound_pitch :: proc(sound: Sound, pitch: f32)
 
 // Move the sound to another spot in its audio. `seconds` is measured from the start of the audio.
-// Use `get_sound_length` to find out how long the sound is.
+// Use `get_sound_duration` to find out how long the sound is.
 //
-// Note that calling this for an Audio_Clip-based sound is fast. But calling it for an Audio_Stream-
-// based Sound can be a bit slower. The stream has to seek, perhaps fetching data from disk.
+// The seek will happen during the next mixing pass. It happens by quickly fading out the sound,
+// moving to the new position and then fading it back in. This avoids any pops in the sound due to
+// audio wave discontinuities.
+//
+// If you set the time for a non-playing or paused sound, then they will start from there when
+// played.
 set_sound_time :: proc(sound: Sound, seconds: f32)
 
 // Get how far into its audio the sound currently is, in seconds. A looping sound goes back to 0
 // each time it starts over. Returns 0 if the sound doesn't exist.
 get_sound_time :: proc(sound: Sound) -> f32
 
-// Get the length of the sound's audio, in seconds. Use it together with `get_sound_time` to show
-// how far into a song you are. Returns 0 if the sound doesn't exist or if the length is unknown.
-get_sound_length :: proc(sound: Sound) -> f32
+// Get the duration of the sound's audio, in seconds. Use it together with `get_sound_time` to show
+// how far into a sound you are. Returns 0 if the sound doesn't exist.
+get_sound_duration :: proc(sound: Sound) -> f32
 
 // Make a sound loop when it reaches the end.
 //
-// Technical note: This also works for sounds started using `play_audio_stream`, but then it
-// reaches into the streaming decoder and tells that one to loop. A `Sound` started from a stream
-// plays a short buffer that the decoder keeps filling, so that sound always loops.
+// Affects a playing Sound, but is also remembered for the next time the sound is played.
 set_sound_loop :: proc(sound: Sound, loop: bool)
 
 // Route a sound into an audio bus. Pass `AUDIO_BUS_MASTER` for the master bus.
+//
+// Affects a playing Sound, but is also remembered for the next time the sound is played.
 set_sound_bus :: proc(sound: Sound, bus: Audio_Bus)
 
-// How many sounds currently play this clip. Useful for limiting how many overlapping sounds you
-// start from the same clip.
-get_num_sounds_playing_clip :: proc(clip: Audio_Clip) -> int
+// Returns how many `Sound` objects there are that refer to the same audio clip.
+count_sounds_from_clip :: proc(clip: Audio_Clip) -> int
 
-// Load a audio file from disk. Returns an `Audio_Clip` which can be played using `play_audio_clip`.
+// Load an audio file from disk. Returns an `Audio_Clip` which can be played using `play_audio_clip`
 //
 // Supports WAV and OGG files.
 //
@@ -695,8 +832,8 @@ load_audio_clip_from_bytes_raw :: proc(
 	channels: Audio_Channels,
 ) -> (Audio_Clip, bool) #optional_ok
 
-// Destroy an audio clip previously loaded using `load_audio_clip_from_xxx`. Also stops sounds
-// playing this clip.
+// Destroy an audio clip previously loaded using `load_audio_clip_from_xxx`. Stops any currently
+// playing instances of this clip. Destroys `Sound`s created using `create_sound` that use this clip
 destroy_audio_clip :: proc(clip: Audio_Clip)
 
 // Load an audio stream from a file on disk. This is often used for playing music. An audio stream
@@ -760,36 +897,80 @@ destroy_audio_stream :: proc(stream: Audio_Stream)
 // is immune to both in-game stalls and external stalls, such as the window being moved.
 update_audio_stream :: proc(stream: Audio_Stream)
 
-// Start playing an audio stream. Returns a `Sound`, which you can control using
-// `set_sound_volume`, `stop_sound` etc. The playback starts from wherever the stream last was,
-// which is the beginning if the stream was just loaded, was stopped using `stop_sound` or has
-// finished playing.
+// Start playing an audio stream. If the stream is already playing, then it is restarted. If it is
+// paused, then it continues playing.
 //
-// A stream can only play one sound at a time. If it is already playing, then this hands back the
-// sound that is already playing and ignores the settings you pass in. Use the `set_sound_xxx`
-// procedures to change how it plays. Use `stop_sound` first if you want to start over from the
-// beginning. A paused sound starts playing again.
+// An audio stream can only be played once at a time, since the stream contains the decoder state.
 //
 // Don't forget to call `update_audio_stream` every frame in order to stream in new data.
-play_audio_stream :: proc(
-	stream: Audio_Stream,
-	volume: f32 = 1,
-	pan: f32 = 0,
-	pitch: f32 = 1,
-	loop := false,
-	bus: Audio_Bus = AUDIO_BUS_MASTER,
-) -> Sound
+play_audio_stream :: proc(stream: Audio_Stream)
+
+// Pause an audio stream previously started using `play_audio_stream`. Resume it using
+// `play_audio_stream`.
+pause_audio_stream :: proc(stream: Audio_Stream)
+
+// Stop an audio stream previously started using `play_audio_stream`. This will rewind the audio
+// stream to the start. Stopping a paused stream silently rewinds it to the start.
+stop_audio_stream :: proc(stream: Audio_Stream)
+
+// Returns true if the audio stream is currently playing. Returns false if it is paused.
+audio_stream_is_playing :: proc(stream: Audio_Stream) -> bool
+
+// Returns true if the audio stream is paused. A stopped audio stream is not paused.
+audio_stream_is_paused :: proc(stream: Audio_Stream) -> bool
+
+// Set the volume of an audio stream. Range: [0, 1].
+//
+// Affects a playing stream and is remembered for future playback.
+set_audio_stream_volume :: proc(stream: Audio_Stream, volume: f32)
+
+// Set the pan of an audio stream. Range [-1, 1].
+//
+// Affects a playing stream and is remembered for future playback.
+set_audio_stream_pan :: proc(stream: Audio_Stream, pan: f32)
+
+// Set the pitch of an audio stream. Range is `[0.01, inf)`.
+//
+// Affects a playing stream and is remembered for future playback.
+set_audio_stream_pitch :: proc(stream: Audio_Stream, pitch: f32)
+
+// Sets a stream to loop back to the start when it finishes playing.
+//
+// Affects a playing stream and is remembered for future playback.
+set_audio_stream_loop :: proc(stream: Audio_Stream, loop: bool)
+
+// Move the stream to some other bus. The bus may have playback settings of its own that are then
+// applied to the stream.
+//
+// Affects a playing stream and is remembered for future playback.
+set_audio_stream_bus :: proc(stream: Audio_Stream, bus: Audio_Bus)
+
+// Move the stream to another spot in its audio. `seconds` is measured from the start of the
+// streamed file. Use `get_audio_stream_duration` to find out how long the sound is.
+//
+// If you set the time while a stream is paused or stopped, then it will start from that time when
+// played.
+set_audio_stream_time :: proc(stream: Audio_Stream, seconds: f32)
+
+// Get how far into the streamed file the stream currently is playing from, in seconds. A looping
+// stream goes back to 0 each time it starts over.
+//
+// If you use `set_audio_stream_time` but the audio streaming system hasn't had time to seek to that
+// time yet, then that time will still be reported as the "current" time.
+get_audio_stream_time :: proc(stream: Audio_Stream) -> f32
+
+// Returns how many seconds long the streamed file is.
+get_audio_stream_duration :: proc(stream: Audio_Stream) -> f32
 
 // Create an audio bus: A group of sounds that are mixed together before they reach the master bus.
 // Route sounds into it using `set_sound_bus`, or the `bus` parameter of `play_audio_clip` or
-// `play_audio_stream`.
+// `set_audio_stream_bus`.
 //
 // A new bus has volume 1, pan 0 and no effect. That makes it a passthrough: Playing a sound on a
 // fresh bus sounds exactly like playing it on the master bus, until you change something.
 create_audio_bus :: proc() -> Audio_Bus
 
-// Destroy an audio bus. Everything routed to it goes back to the master bus, including sounds that
-// are playing right now.
+// Destroy an audio bus. Everything playing on this bus will start playing on the master bus.
 destroy_audio_bus :: proc(bus: Audio_Bus)
 
 // Set the volume of an audio bus. Range: 0 to 1. Everything mixed into the bus is scaled by this.
@@ -821,8 +1002,9 @@ set_audio_bus_effect :: proc(bus: Audio_Bus, effect: Audio_Effect_Proc, user_dat
 //
 // This procedure is run automatically by `update`. You normally don't have to call it.
 //
-// Note that you should always call this once a frame, be it through `update` or manually. It
-// removes sounds that have been declared dead by the audio thread. 
+// Note that you should always call this once a frame, be it through `update` or manually. It is
+// responsible for removing voices (the playback state of clips, sounds and streams) that have
+// finished playing.
 update_audio :: proc()
 
 //-----------------//
@@ -1087,8 +1269,8 @@ set_shader_constant :: proc(shd: Shader, loc: Shader_Constant_Location, val: any
 // Set a shader to use a specific texture. Look up the bindpoint using the `texture_lookup` field
 // inside the `Shader` object.
 //
-// You don't need to call this when drawing normal textures, it's for advanced usage where you have
-// multiple textures as inputs to a shader.
+// You don't need to call this when drawing normal textures. It's for advanced usage where you have
+// multiple textures as inputs to a shader. For normal texture drawing, use `draw_texture_*`.
 set_shader_texture :: proc(shd: Shader, bindpoint: int, texture: Texture)
 
 // Sets the value of a shader input (also known as a shader attribute). There are three default
@@ -1301,16 +1483,7 @@ RL_RAYWHITE   :: Color { 245, 245, 245, 255 }
 
 color_alpha :: proc(c: Color, a: u8) -> Color
 
-Texture :: struct {
-	// The render-backend specific texture identifier.
-	handle: Texture_Handle,
-
-	// The horizontal size of the texture, measured in pixels.
-	width: int,
-
-	// The vertical size of the texture, measure in pixels.
-	height: int,
-}
+Texture :: distinct Handle
 
 Load_Texture_Option :: enum {
 	// Will multiply the alpha value of the each pixel into the its RGB values. Useful if you want
@@ -1344,8 +1517,70 @@ Render_Texture :: struct {
 }
 
 Texture_Filter :: enum {
-	Point,  // Similar to "nearest neighbor". Pixly texture scaling.
+	Point, // Similar to "nearest neighbor". Pixly texture scaling.
 	Linear, // Smoothed texture scaling.
+}
+
+// Controls what happens when the `source` rect of `draw_texture_rect` and `draw_texture_fit`
+// contains pixel coordinates that extend outside the texture.
+Texture_Wrap :: enum {
+	// The color at the border is repeated.
+	Clamp,
+
+	// The texture is repeated, or "wraps around".
+	Repeat,
+
+	// The texture is repeated, but the repeated image is flipped.
+	Mirrored_Repeat,
+
+	// A color is drawn for all pixels that fall outside the texture. The color is decided by
+	// `wrap_border_color: Texture_Wrap_Border_Color` of `Texture_Sampler`.
+	//
+	// WEB: Not supported. If you use this on web then Clamp is used instead.
+	Border,
+}
+
+// The color to use when `wrap_x/y` of `Texture_Sampler` has the `Border` value.
+Texture_Wrap_Border_Color :: enum {
+	Transparent_Black, // Color {0, 0, 0, 0}
+	Black, // Color {0, 0, 0, 255}
+	White, // Color {255, 255, 255, 255}
+}
+
+// Settings for how textures are sampled, which affects how they are rendered.
+Texture_Sampler :: struct {
+	// How the texture is filtered when it is scaled down.
+	scale_down_filter: Texture_Filter,
+
+	// How the texture is filtered when it is scaled up.
+	scale_up_filter: Texture_Filter,
+
+	// The wrapping mode along the horizontal axis of the texture.
+	wrap_x: Texture_Wrap,
+
+	// The wrapping mode along the vertical axis of the texture.
+	wrap_y: Texture_Wrap,
+
+	// The color to use when `wrap_x` or `wrap_y` is `Border`.
+	wrap_border_color: Texture_Wrap_Border_Color,
+}
+
+Texture_Object :: struct {
+	handle: Texture,
+	rb_texture: Render_Backend_Texture,
+	width: int,
+	height: int,
+	flip_y: bool,
+	sampler: Texture_Sampler,
+	sampler_overrides: bit_set[Texture_Sampler_Field],
+}
+
+Texture_Sampler_Field :: enum {
+	Scale_Down_Filter,
+	Scale_Up_Filter,
+	Wrap_X,
+	Wrap_Y,
+	Wrap_Border_Color,
 }
 
 // An image kept in RAM, you can fill this out and pass it to `load_texture_from_image` in order
@@ -1401,8 +1636,38 @@ Window_Mode :: enum {
 	Borderless_Fullscreen,
 }
 
+Monitor_Id :: distinct u64
+
+MONITOR_NONE :: Monitor_Id(0)
+
+Monitor_Info :: struct {
+	id: Monitor_Id,
+
+	// Allocated by `get_monitors`.
+	name: string,
+
+	// The window position. Uses the same coordinate space as `get_window_position`. On most
+	// platforms this means top-left corner is {0, 0} and Y grows downwards. But on mac the window
+	// has its position it the bottom-left corner and Y grows upwards.
+	position: [2]int,
+
+	// Pixel resolution.
+	size: [2]int,
+
+	// Measured in millimeters.
+	physical_size: [2]int,
+
+	scale: f32,
+	primary: bool,
+}
+
 Init_Options :: struct {
 	window_mode: Window_Mode,
+
+	// The game will start on this monitor. If `window_mode` is non-fullscreen, then the center of
+	// the provided monitor will be used. If left zero-initialized, then the default monitor will be
+	// used, with the default positioning.
+	monitor: Monitor_Id,
 
 	// Enable to request anti-alias. On most systems this means 4x Multi Sample Anti Alias
 	anti_alias: bool,
@@ -1415,6 +1680,13 @@ Init_Options :: struct {
 	// platforms, such as Linux+Wayland, it does not work, because Wayland always auto scales all
 	// windows.
 	disable_auto_scale_hint: bool,
+
+	// Disables vertical sync, see `set_vsync` for more information.
+	disable_vsync: bool,
+
+	// Limits the Frames Per Second (FPS). `0` means no limit. See `set_fps_limit` for more
+	// information.
+	fps_limit: int,
 
 	// Enable depth testing. Draws are then sorted by the z value set with `set_z`: higher z ends up
 	// in front. Things drawn at the same z use the drawing order, like when depth testing is off.
@@ -1457,7 +1729,7 @@ Shader :: struct {
 	// Maps built in constant types such as "model view projection matrix" to a location.
 	constant_builtin_locations: [Shader_Builtin_Constant]Maybe(Shader_Constant_Location),
 
-	texture_bindpoints: []Texture_Handle,
+	texture_bindpoints: []Texture,
 
 	// Used to lookup bindpoints of textures. You can then set the texture by calling
 	// `set_shader_texture and supplying it with the bindpoint you looked up.
@@ -1569,7 +1841,7 @@ Font_Data :: struct {
 }
 
 Handle :: hm.Handle64
-Texture_Handle :: distinct Handle
+Render_Backend_Texture :: distinct Handle
 Render_Target_Handle :: distinct Handle
 Font :: distinct int
 DEFAULT_FONT_DATA :: #load("default_fonts/roboto.ttf")
@@ -1624,13 +1896,13 @@ Font_Baked_Glyph :: struct {
 	advance: f32,
 }
 
-FONT_NONE :: Font(0)
-
 // The default font. It's a font called "roboto". It is loaded from `DEFAULT_FONT_DATA` on Karl2D is
-// initialized.
-FONT_DEFAULT :: Font(1)
+// initialized. It is the zero value, which means that any zero-initialized `Font` variable will be
+// the default font.
+FONT_DEFAULT :: Font(0)
 
-TEXTURE_NONE :: Texture_Handle {}
+TEXTURE_NONE :: Texture {}
+RENDER_BACKEND_TEXTURE_NONE :: Render_Backend_Texture {}
 RENDER_TARGET_NONE :: Render_Target_Handle {}
 
 AUDIO_MIX_SAMPLE_RATE :: 44100
@@ -1639,13 +1911,26 @@ AUDIO_MIX_SAMPLE_RATE :: 44100
 // sample in an array of samples will be interpreted as left and right respectively.
 Audio_Sample :: f32
 
-// Represents something that is currently playing in the audio mixer. Created using
-// `play_audio_clip` and `play_audio_stream`. A sound is automatically destroyed when it finishes
-// playing. It is safe to keep using the handle after that: The procedures that take a `Sound` will
-// then just do nothing.
+Audio_Voice :: distinct Handle
+
+// Created using `create_sound` from an Audio_Clip. Keeps track of an Audio_Clips playback state and
+// lets you control its playback settings.
 Sound :: distinct Handle
 
 SOUND_NONE :: Sound {}
+
+Sound_Object :: struct {
+	handle: Sound,
+	clip: Audio_Clip,
+	voice: Audio_Voice,
+	volume: f32,
+	pan: f32,
+	pitch: f32,
+	bus: Audio_Bus,
+	loop: bool,
+	seek_requested: bool,
+	seek_offset: int,
+}
 
 // Plays an ogg file by decoding it a little bit at a time, instead of loading all of the audio
 // data up front like an `Audio_Clip` does. Good for music, which would otherwise use a lot of
@@ -1672,29 +1957,22 @@ Audio_Stream_Mode :: enum {
 	From_Bytes,
 }
 
-Audio_Stream_Seek_State :: enum {
-	None,
-	Fading_Out,
-	Ready,
-	Seeking,
-}
-
 // From stb_vorbis.odin "In my test files the maximal-size usage is ~150KB.)"
 VORBIS_STATE_SIZE :: 300 * mem.Kilobyte
 
 Audio_Stream_Cursor :: struct {
 	// Where in `Audio_Stream_Data.buffer` we have most recently written samples. Together with
-	// `Sound_Object.offset`, this forms a circular buffer. This field is the 'head' and the offset
-	// is the 'tail'.
+	// `Audio_Voice_Object.offset`, this forms a circular buffer. This field is the 'head' and the
+	// offset is the 'tail'.
 	buffer_write_pos: int,
 
 	// Where in the streamed source we most recently fetched samples from. For stereo, left and
 	// right count as one sample each.
 	decode_cursor: int,
 
-	// Used for discarding unwanted samples at the decode cursor. This exists because the vorbis
-	// pushdata API can't position the decoding exactly. When seeking we land the decoder at or
-	// before the wanted spot and store how many samples to skip from there.
+	// Used for discarding unwanted samples at the decode cursor. This exists because vorbis can't
+	// position the decoding exactly. When seeking, we land the decoder at or before the wanted spot
+	// and store how many samples to skip from there.
 	//
 	// Also used for short forward seeks, which don't move the file at all and just decode past the
 	// samples in between.
@@ -1706,7 +1984,11 @@ Audio_Stream_Data :: struct {
 	
 	vorbis: ^stbv.vorbis,
 	vorbis_buffer: stbv.vorbis_alloc,
-	sound: Sound,
+	voice: Audio_Voice,
+	bus: Audio_Bus,
+	volume: f32,
+	pan: f32,
+	pitch: f32,
 	buffer: Audio_Buffer,
 
 	cursor: Audio_Stream_Cursor,
@@ -1717,14 +1999,18 @@ Audio_Stream_Data :: struct {
 	// when the stream is loaded. Zero if it could not be worked out.
 	total_samples: int,
 
-	// Different from `loop` in `Sound_Object`. This says if the whole stream should loop
-	// when it reaches end-of-file. The `loop` in `Sound_Object` just says to loop the
+	// Different from `loop` in `Audio_Voice_Object`. This says if the whole stream should loop
+	// when it reaches end-of-file. The `loop` in `Audio_Voice_Object` just says to loop the
 	// buffer itself. That's something you always want for a stream: We are continously writing
 	// data from a file into a small buffer that is a few seconds long.
 	loop: bool,
 
-	seek_state: Audio_Stream_Seek_State,
+	// Used by mixer and `update_audio_stream`. The mixer fades the stream down to zero very
+	// quickly when a seek is requested. Then `update_audio_stream` seeks.
+	seek_requested: bool,
 	seek_seconds: f32,
+
+	end_reached: bool,
 
 	mode: Audio_Stream_Mode,
 
@@ -1756,11 +2042,8 @@ Audio_Buffer :: distinct Handle
 AUDIO_BUFFER_NONE :: Audio_Buffer {}
 
 // A piece of audio that has been completely loaded into memory. Play it using `play_audio_clip`.
-//
 // This is actually just an `Audio_Buffer`, but under a distinct name that is given special
-// treatment. When `play_audio_clip` runs, then a `Sound` is created. The `Sound` tracks where in
-// the `Audio_Clip` it is playing audio from. That way, many `Sound` instances can play audio from
-// the same `Audio_Clip` data.
+// treatment.
 Audio_Clip :: distinct Audio_Buffer
 
 AUDIO_CLIP_NONE :: Audio_Clip{}
@@ -1777,74 +2060,69 @@ Audio_Buffer_Object :: struct {
 	// interpolation will happen during mixing.
 	sample_rate: int,
 
-	// If this is Stereo, then the left and right samples are interleaved in `samples`.
-	channels: Audio_Channels,
+	// `1` means mono, `2` means stereo. For stereo, the left and right samples are interleaved in 
+	// `samples`.
+	channels: int,
 }
 
-Sound_Settings :: struct {
-	volume: f32,
-	pan: f32,
-	pitch: f32,
-}
-
-// A `Sound_Object` is what `Sound` handles map to. It represents something currently playing in
-// the mixer. It holds a `buffer` which is where the mixer reads audio samples from. How that buffer
-// gets refilled depends on the `source` field. The source can either be an Audio_Clip or an
-// Audio_Stream. For clips `buffer` is the same as the clip's buffer. For audio streams the
-// buffer is a small amount of memory that is continuously being filled with data from the audio
-// stream.
-Sound_Object :: struct {
-	handle: Sound,
+// An `Audio_Voice_Object` is what `Audio_Voice` handles map to. It represents something currently
+// playing in the mixer. It holds a `buffer` which is where the mixer reads audio samples from.
+//
+// The `buffer` will get filled in a few different ways. When playing audio using `play_audio_clip`
+// or `play_sound` then the buffer is the whole clip. When playing audio using `play_audio_stream`
+// the `update_audio_stream` will fill `buffer` with more data. In the stream case the buffer is
+// just a short buffer that is continuously looped and refilled.
+Audio_Voice_Object :: struct {
+	handle: Audio_Voice,
 	buffer: Audio_Buffer,
-	target_settings: Sound_Settings,
-	current_settings: Sound_Settings,
+	volume: f32,
+	target_volume: f32,
+	pan: f32,
+	target_pan: f32,
+	pitch: f32,
 
 	// Where in `buffer` should we play samples from next?
 	offset: int,
 
-	// Only used when playing sounds that have pitch != 1 or when the sound has a sample rate that
+	// Only used when playing voices that have pitch != 1 or when the voice has a sample rate that
 	// does not match the mixer's sample rate. In those cases we may get "fractional samples"
 	// because we may be in samples that are in-between two samples in the original sound.
 	offset_fraction: f32,
 
-	// If source is Audio_Clip: Set this flag using `set_sound_loop`.
-	// If source is Audio_Stream: Always true (the stream has its own loop flag internally and just
-	// refills the buffer with data, which continuously plays it). `set_sound_loop` will set the
-	// loop flag inside the Audio_Stream source data.
+	// If true, then this voice will loop when the end of the buffer is reached.
+	//
+	// Behaves differently depending on how the voice was created.
+	// - Using `play_audio_clip`: Always `false`.
+	// - Using `play_sound`: Controlled by `set_sound_loop`.
+	// - Using `play_audio_stream`: Always `true`. Streams use a short buffer that data is streamed
+	//   into. That buffer is always looping. `set_audio_stream_loop` does not touch this flag, the
+	//   stream has its own `loop` flag that is used while decoding the stream and adding new
+	//   samples into the buffer.
 	loop: bool,
 
-	// Set using `set_sound_paused`. The mixer skips paused sounds.
-	paused: bool,
-
-	// If true, then this Sound will be deleted next time `update_audio` runs. We don't remove
-	// directly when mixing because we don't want to touch memory allocations there. This is because
-	// the mixing may happen on a thread. It may look like `hm.remove` is thread safe. But the
-	// handle map uses an XAR array. The XAR array may internally append to a dynamically allocated
-	// freelist, which can cause allocations to happen.
-	remove: bool,
-
-	// For seeking audio clips. The mixer does the seeking since it needs to fade out, move the
-	// playback position and then fade in again. This avoids clicks when seeking.
-	//
-	// For Audio_Stream-based sounds, the seeking state is inside Audio_Stream_Data.
-	clip_has_pending_seek: bool,
-	clip_pending_seek_seconds: f32,
+	play_state: Audio_Voice_Play_State,
 
 	// The bus this is mixed into. The zero value is the master bus.
 	bus: Audio_Bus,
 
-	// This is the Audio_Clip or Audio_Stream that was passed to either `play_audio_clip` or
-	// `play_audio_stream`, whichever was used to create this Sound.
-	source: union #no_nil {
+	source: union {
 		Audio_Clip,
+		Sound,
 		Audio_Stream,
 	},
 }
 
+Audio_Voice_Play_State :: enum {
+	Playing,
+	Pausing,
+	Paused,
+	Stopping,
+	Stopped,
+}
+
 // A bus is a group of sounds that are mixed together before they reach the master bus. You can set
 // the volume and the pan of the whole group, and you can run an effect on it. Create one using
-// `create_audio_bus` and route sounds into it using `set_sound_bus`, or the `bus` parameter of
-// `play_audio_clip` or `play_audio_stream`.
+// `create_audio_bus` and route audio into it using `set_sound_bus` and `set_audio_stream_bus`.
 Audio_Bus :: distinct Handle
 
 // All other buses are mixed into the master bus, as well as sounds that play directly on the master
@@ -1859,33 +2137,25 @@ AUDIO_BUS_MASTER :: Audio_Bus {}
 // `user_data` is the user data you passed to `set_audio_bus_effect`.
 Audio_Effect_Proc :: proc(samples: [][2]Audio_Sample, user_data: rawptr)
 
-Audio_Bus_Settings :: struct {
-	volume: f32,
-	pan: f32,
-}
-
 Audio_Bus_Object :: struct {
 	handle: Audio_Bus,
 
-	// Same idea as in `Sound_Object`: The current settings move towards the target
+	// Same idea as in `Audio_Voice_Object`: The current settings move towards the target
 	// settings a bit at a time, so that changing the volume of a bus doesn't click.
-	target_settings: Audio_Bus_Settings,
-	current_settings: Audio_Bus_Settings,
+	volume: f32,
+	target_volume: f32,
+	pan: f32,
+	target_pan: f32,
 
 	effect: Audio_Effect_Proc,
 	effect_user_data: rawptr,
 
-	// The sounds routed to this bus are mixed in here. The bus effect runs on this. Then this is
+	// The voices routed to this bus are mixed in here. The bus effect runs on this. Then this is
 	// mixed into the master bus. Unused for the master bus itself: That one is mixed straight into
 	// `mix_buffer`.
 	//
 	// Will be `s.ab.mix_chunk_size` long.
 	chunk: [][2]Audio_Sample,
-}
-
-DEFAULT_AUDIO_BUS_SETTINGS :: Audio_Bus_Settings {
-	volume = 1,
-	pan = 0,
 }
 
 // This keeps track of the internal state of the library. Usually, you do not need to poke at it.
@@ -1895,9 +2165,11 @@ State :: struct {
 	allocator: runtime.Allocator,
 	frame_arena: runtime.Arena,
 	frame_allocator: runtime.Allocator,
-	platform_state: rawptr,
-	render_backend: Render_Backend_Interface,
-	render_backend_state: rawptr,
+	pf_state: ^Platform_State,
+
+	// rb == Render Backend
+	rb: Render_Backend_Interface,
+	rb_state: ^Render_Backend_State,
 
 	close_window_requested: bool,
 
@@ -1931,12 +2203,11 @@ State :: struct {
 	gamepad_button_went_up: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
 	gamepad_button_is_held: [MAX_GAMEPADS]#sparse [Gamepad_Button]bool,
 
-	// Also see FONT_NONE and FONT_DEFAULT
+	// Also see FONT_DEFAULT
 	fonts: [dynamic]Font_Data,
 	font_cache: fc.Cache,
 	font_atlas_texture: Texture,
-	font_atlas_filter: Texture_Filter,
-	shape_drawing_texture: Texture_Handle,
+	shape_drawing_texture: Texture,
 
 	// These `current_` are set when procs like `set_shader` etc run. When you draw more stuff, then
 	// they are compared against what `current_draw_call` says. If there is a difference, then a new
@@ -1944,7 +2215,9 @@ State :: struct {
 	current_camera: Maybe(Camera),
 	current_shader: Shader,
 	current_scissor: Maybe(Rect),
-	current_texture: Texture_Handle,
+	current_texture: Texture,
+	textures: hm.Dynamic_Handle_Map(Texture_Object, Texture),
+	default_texture_sampler: Texture_Sampler,
 	current_render_target: Render_Target_Handle,
 
 	// Size of `current_render_target`, or 0 when drawing to the window. Needed to build the
@@ -1984,8 +2257,10 @@ State :: struct {
 	default_shader: Shader,
 
 	// Time when the first call to `new_frame` happened
-	start_time: time.Time,
-	prev_frame_time: time.Time,
+	start_time: time.Tick,
+	prev_frame_tick: time.Tick,
+	last_present_tick: time.Tick,
+	fps_limit_frame_duration: time.Duration,
 
 	// "dt"
 	frame_time: f32,
@@ -1995,11 +2270,12 @@ State :: struct {
 	// -----
 	// Audio
 
-	// Audio Backend. Shortened because we write `s.ab` many times.
+	// ab == Audio Backend
 	ab: Audio_Backend_Interface,
 	ab_state: ^Audio_Backend_State,
 
 	audio_buffers: hm.Dynamic_Handle_Map(Audio_Buffer_Object, Audio_Buffer),
+	audio_voices: hm.Dynamic_Handle_Map(Audio_Voice_Object, Audio_Voice),
 	sounds: hm.Dynamic_Handle_Map(Sound_Object, Sound),
 
 	audio_streams: hm.Dynamic_Handle_Map(Audio_Stream_Data, Audio_Stream),

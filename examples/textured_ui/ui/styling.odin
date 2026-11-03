@@ -3,7 +3,7 @@ package ui
 import k2 "../../.."
 
 draw_window_frame :: proc(ui_context: ^UI_Context, window: ^Window) {
-	if ui_context.theme.window_skin.texture.handle != k2.TEXTURE_NONE {
+	if ui_context.theme.window_skin.texture != k2.TEXTURE_NONE {
 		draw_skin(ui_context, window.rect, ui_context.theme.window_skin)
 	} else if .Borderless not_in window.options {
 		draw_rounded_rect(window.rect, ui_context.corner * 0.5, ui_context.theme.window_border)
@@ -11,16 +11,16 @@ draw_window_frame :: proc(ui_context: ^UI_Context, window: ^Window) {
 }
 
 draw_window_content :: proc(ui_context: ^UI_Context, bg_rect: Rect) {
-	if ui_context.theme.window_skin.texture.handle == k2.TEXTURE_NONE {
+	if ui_context.theme.window_skin.texture == k2.TEXTURE_NONE {
 		draw_rounded_rect(bg_rect, ui_context.corner, ui_context.theme.window_bg)
 	}
 }
 
 draw_panel_background :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin) {
 	chosen := skin
-	if chosen.texture.handle == k2.TEXTURE_NONE do chosen = ui_context.theme.panel_skin
+	if chosen.texture == k2.TEXTURE_NONE do chosen = ui_context.theme.panel_skin
 	panel_color := ui_context.theme.panel_bg
-	if chosen.texture.handle == k2.TEXTURE_NONE {
+	if chosen.texture == k2.TEXTURE_NONE {
 		darken_factor := max(1 - f32(ui_context.panel_depth + 1) * 0.05, 0.7)
 		for i in 0 ..< 3 do panel_color[i] = u8(f32(panel_color[i]) * darken_factor)
 	}
@@ -42,7 +42,7 @@ draw_scrollbar_thumb :: proc(ui_context: ^UI_Context, thumb: Rect, thumb_color: 
 }
 
 draw_button_background :: proc(ui_context: ^UI_Context, rect: Rect, button_color: Color) {
-	if ui_context.theme.button_skin.texture.handle != k2.TEXTURE_NONE {
+	if ui_context.theme.button_skin.texture != k2.TEXTURE_NONE {
 		draw_skin(ui_context, rect, ui_context.theme.button_skin, button_color)
 	} else {
 		draw_rounded_rect(rect, ui_context.corner, ui_context.theme.separator)
@@ -71,7 +71,7 @@ draw_toggle_track :: proc(ui_context: ^UI_Context, track_rect: Rect, toggle_fill
 }
 
 draw_surface :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin, corner: f32, color: Color, tint := k2.WHITE) {
-	if skin.texture.handle != k2.TEXTURE_NONE {
+	if skin.texture != k2.TEXTURE_NONE {
 		draw_skin(ui_context, rect, skin, tint)
 	} else {
 		draw_rounded_rect(rect, corner, color)
@@ -79,7 +79,7 @@ draw_surface :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin, corner: f3
 }
 
 draw_slice_surface :: proc(ui_context: ^UI_Context, rect: Rect, slices: Three_Slice, corner: f32, color: Color, tint := k2.WHITE) {
-	if slices.texture.handle != k2.TEXTURE_NONE {
+	if slices.texture != k2.TEXTURE_NONE {
 		draw_three_slice(ui_context, rect, slices, tint)
 	} else {
 		draw_rounded_rect(rect, corner, color)
@@ -88,7 +88,7 @@ draw_slice_surface :: proc(ui_context: ^UI_Context, rect: Rect, slices: Three_Sl
 
 draw_round_thumb :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin, color: Color, active: bool) {
 	thumb := rect
-	if skin.texture.handle != k2.TEXTURE_NONE {
+	if skin.texture != k2.TEXTURE_NONE {
 		source := skin_source(skin)
 		scale := min(rect.w / source.w, rect.h / source.h)
 		thumb.w, thumb.h = source.w * scale, source.h * scale
@@ -101,7 +101,7 @@ draw_round_thumb :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin, color:
 
 slider_thumb_size :: proc(ui_context: ^UI_Context, style: Bar_Style, track_height: f32) -> Vec2 {
 	height := ui_context.font_height
-	if style.thumb.texture.handle != k2.TEXTURE_NONE {
+	if style.thumb.texture != k2.TEXTURE_NONE {
 		height = max(height, track_height + 10)
 		source := skin_source(style.thumb)
 		return {height * source.w / source.h, height}
@@ -111,7 +111,7 @@ slider_thumb_size :: proc(ui_context: ^UI_Context, style: Bar_Style, track_heigh
 
 selection_height :: proc(ui_context: ^UI_Context, row_height: f32) -> f32 {
 	height := max(0, row_height - 8)
-	if ui_context.theme.segmented_selection.texture.handle != k2.TEXTURE_NONE {
+	if ui_context.theme.segmented_selection.texture != k2.TEXTURE_NONE {
 		height = min(height, ui_context.theme.segmented_selection.source[1].h)
 	}
 	return height

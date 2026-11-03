@@ -1,11 +1,11 @@
 #+build linux
-#+private file
+#+private package
+
 package karl2d
 
-@(private="package")
 LINUX_WINDOW_WAYLAND :: Linux_Window_Interface {
-	state_size = wl_state_size,
-	try_load = wl_try_load,
+	state_type = WL_State,
+	is_available = wl_is_available,
 	init = wl_init,
 	shutdown = wl_shutdown,
 	get_window_render_glue = wl_get_window_render_glue,
@@ -19,7 +19,11 @@ LINUX_WINDOW_WAYLAND :: Linux_Window_Interface {
 	set_screen_size = wl_set_screen_size,
 	get_window_scale = wl_get_window_scale,
 	set_window_mode = wl_set_window_mode,
+	get_window_mode = wl_get_window_mode,
 	set_window_icon = wl_set_window_icon,
+	get_monitors = wl_get_monitors,
+	get_window_monitor = wl_get_window_monitor,
+	set_window_monitor = wl_set_window_monitor,
 	set_cursor_hidden = wl_set_cursor_hidden,
 	is_cursor_hidden = wl_is_cursor_hidden,
 	set_mouse_locked = wl_set_mouse_locked,
@@ -27,7 +31,6 @@ LINUX_WINDOW_WAYLAND :: Linux_Window_Interface {
 	create_custom_cursor = wl_create_custom_cursor,
 	set_cursor = wl_set_cursor,
 	destroy_custom_cursor = wl_destroy_custom_cursor,
-	set_internal_state = wl_set_internal_state,
 }
 
 import "base:runtime"
@@ -51,22 +54,16 @@ _ :: fmt
 // THEME_CURSOR_SIZE*scale physical pixels and a viewport scales it back down to this.
 THEME_CURSOR_SIZE :: 24
 
-@(private="package")
-
-wl_state_size :: proc() -> int {
-	return size_of(WL_State)
-}
-
-wl_try_load :: proc(
-	failure_reason_allocator: runtime.Allocator,
-) -> (
-	failure_reason: string,
-	ok: bool,
-) {
+wl_is_available :: proc() -> (_failure_reason: string, _ok: bool) {
 	// Load the wayland shared library
 	if missing, load_ok := wl.load(); !load_ok {
-		return fmt.aprintf("Not using Wayland. Could not load %v.", missing,
-			allocator = failure_reason_allocator), false
+		failure_reason := fmt.aprintf(
+			"Not using Wayland. Could not load %v.",
+			missing,
+			allocator = frame_allocator,
+		)
+
+		return failure_reason, false
 	}
 
 	// The wayland library being installed does not mean there is a compositor to talk to. Connect
@@ -82,37 +79,48 @@ wl_try_load :: proc(
 
 	if missing, load_ok := xkb.load(); !load_ok {
 		wl.unload()
-		return fmt.aprintf("Not using Wayland. Could not load %v.", missing,
-			allocator = failure_reason_allocator), false
+
+		failure_reason := fmt.aprintf(
+			"Not using Wayland. Could not load %v.",
+			missing,
+			allocator = frame_allocator,
+		)
+
+		return failure_reason, false
 	}
 
 	return "", true
 }
 
 wl_init :: proc(
-	window_state: rawptr,
+	s: ^WL_State,
 	screen_width: int,
 	screen_height: int,
 	window_title: string,
 	options: Init_Options,
 	allocator: runtime.Allocator,
 ) {
-	s = (^WL_State)(window_state)
 	s.allocator = allocator
 	s.scale = 1
 	s.odin_ctx = context
 	hm.dynamic_init(&s.custom_cursors, allocator)
+	s.outputs = make([dynamic]^WL_Output, allocator)
+	s.outputs_showing_window = make([dynamic]^wl.Output, allocator)
+	s.output_order = {
+		ctx = context,
+		allocator = allocator,
+	}
 
 	s.xkb_context = xkb.context_new(.No_Flags)
 
 	s.display = wl.display_connect(nil)
 
 	display_registry := wl.display_get_registry(s.display)
-	wl.add_listener(display_registry, &registry_listener, nil)
+	wl.add_listener(display_registry, &registry_listener, s)
 
 	// registry_listener will collect a lot of object. This will make sure that listener runs.
 	wl.display_roundtrip(s.display)
-	wl.add_listener(s.seat, &seat_listener, nil)
+	wl.add_listener(s.seat, &seat_listener, s)
 
 	// Initializes pointer and keyboard based on seat capabilities.
 	wl.display_roundtrip(s.display)
@@ -131,6 +139,7 @@ wl_init :: proc(
 
 	s.surface = wl.compositor_create_surface(s.compositor)
 	log.ensure(s.surface != nil, "Error creating Wayland surface")
+	wl.add_listener(s.surface, &surface_listener, s)
 	
 	// Makes sure the window does "pings" that keeps it alive.
 	wl.add_listener(s.xdg_base, &wm_base_listener, nil)
@@ -139,7 +148,7 @@ wl_init :: proc(
 	// Top-level means an application at the top of the window hierarchy. The callback in the
 	// top-level listener effectively creates a window handle.
 	s.toplevel = wl.xdg_surface_get_toplevel(s.xdg_surface)
-	wl.add_listener(s.toplevel, &toplevel_listener, nil)
+	wl.add_listener(s.toplevel, &toplevel_listener, s)
 	wl.add_listener(s.xdg_surface, &window_listener, nil)
 
 	// Initialize the custom decorations before anything that draws or sizes the frame, since all
@@ -153,6 +162,7 @@ wl_init :: proc(
 			s.seat,
 			s.compositor,
 			s.subcompositor,
+			s.shm,
 			s.toplevel,
 			s.last_configure_width,
 			s.last_configure_height,
@@ -161,8 +171,59 @@ wl_init :: proc(
 		)
 	}
 
-	wl_set_title(window_title)
-	wl_set_window_mode(options.window_mode)
+	wl_set_title(s, window_title)
+	wl_set_window_mode(s, options.window_mode)
+
+	if options.monitor != MONITOR_NONE {
+		monitor_output := wl_find_output(s, options.monitor)
+
+		if monitor_output == nil {
+			log.errorf(
+				"Cannot use monitor %v, it does not exist. Using the default monitor.",
+				options.monitor,
+			)
+		} else if options.window_mode == .Borderless_Fullscreen {
+			wl.xdg_toplevel_set_fullscreen(s.toplevel, monitor_output)
+			s.fullscreen_output = monitor_output
+		} else {
+			log.warnf(
+				"Cannot open a non-fullscreen window on monitor %v when using Wayland. %s",
+				options.monitor,
+				"Using the default monitor.",
+			)
+		}
+	}
+
+	// `get_window_monitor` needs `s.fullscreen_output` to be set for finding the monitor of a
+	// fullscreen window. But it doesn't happen until stuff is shown in the window. Therefore we
+	// pre-figure it out here, so that proc always works.
+	if options.window_mode == .Borderless_Fullscreen && s.fullscreen_output == nil {
+		closest_to_origin_dist := max(int)
+
+		for o in s.outputs {
+			if s.output_order.first_output != "" && o.connector == s.output_order.first_output {
+				s.fullscreen_output = o.output
+				break
+			}
+
+			position := o.geometry_position
+
+			if o.xdg_output != nil && o.logical_size.x > 0 {
+				position = o.logical_position
+			}
+
+			origin_dist := position.x*position.x + position.y*position.y
+
+			if origin_dist < closest_to_origin_dist {
+				closest_to_origin_dist = origin_dist
+				s.fullscreen_output = o.output
+			}
+		}
+
+		if s.fullscreen_output != nil {
+			wl.xdg_toplevel_set_fullscreen(s.toplevel, s.fullscreen_output)
+		}
+	}
 
 	if s.decoration_manager != nil {
 		decoration := wl.zxdg_decoration_manager_v1_get_toplevel_decoration(
@@ -189,7 +250,7 @@ wl_init :: proc(
 			s.surface,
 		)
 
-		wl.add_listener(fractional_scale, &fractional_scale_listener, nil)
+		wl.add_listener(fractional_scale, &fractional_scale_listener, s)
 	}
 
 	if s.relative_pointer_manager != nil && s.pointer != nil {
@@ -198,7 +259,7 @@ wl_init :: proc(
 			s.pointer,
 		)
 
-		wl.add_listener(s.relative_pointer, &relative_pointer_listener, nil)
+		wl.add_listener(s.relative_pointer, &relative_pointer_listener, s)
 	} else {
 		log.warn("Relative pointer not available: mouse locking will not work")
 	}
@@ -210,7 +271,7 @@ wl_init :: proc(
 	// The cursor shape protocol lets the compositor render its own default cursor at the correct
 	// size and DPI, so the theme is only needed as a fallback for compositors without it.
 	if s.cursor_shape_device == nil {
-		wl_load_cursor_theme()
+		wl_load_cursor_theme(s)
 	}
 
 	s.viewport = wl.wp_viewporter_get_viewport(s.viewporter, s.surface)
@@ -247,6 +308,7 @@ registry_listener := wl.Registry_Listener {
 		interface: cstring,
 		version: u32,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		switch interface {
 		case wl.compositor_interface.name:
@@ -356,13 +418,85 @@ registry_listener := wl.Registry_Listener {
 				&wl.xdg_toplevel_icon_manager_v1_interface,
 				version,
 			)
+
+		case wl.output_interface.name:
+			o := wl_bind_output(registry, name, version, s.xdg_output_manager, s.allocator)
+			append(&s.outputs, o)
+
+		case wl.zxdg_output_manager_v1_interface.name:
+			s.xdg_output_manager = wl.registry_bind(
+				wl.ZXDG_Output_Manager_V1,
+				registry,
+				name,
+				&wl.zxdg_output_manager_v1_interface,
+				version,
+			)
+
+			for o in s.outputs {
+				wl_add_xdg_output(o, s.xdg_output_manager)
+			}
+
+		case wl.kde_output_order_v1_interface.name:
+			wl_bind_output_order(&s.output_order, registry, name, version)
 		}
 	},
-	global_remove = proc "c" (data: rawptr, registry: ^wl.Registry, name: u32) {},
+	global_remove = proc "c" (data: rawptr, registry: ^wl.Registry, name: u32) {
+		s := (^WL_State)(data)
+		context = s.odin_ctx
+
+		for o, i in s.outputs {
+			if o.registry_name != name {
+				continue
+			}
+
+			#reverse for showing_output, showing_output_idx in s.outputs_showing_window {
+				if showing_output == o.output {
+					ordered_remove(&s.outputs_showing_window, showing_output_idx)
+				}
+			}
+
+			if s.scale_output == o.output {
+				s.scale_output = nil
+			}
+
+			if s.fullscreen_output == o.output {
+				s.fullscreen_output = nil
+			}
+
+			wl_destroy_output(o)
+			ordered_remove(&s.outputs, i)
+			wl_update_scale_output(s)
+			break
+		}
+	},
+}
+
+surface_listener := wl.Surface_Listener {
+	enter = proc "c" (data: rawptr, surface: ^wl.Surface, output: ^wl.Output) {
+		s := (^WL_State)(data)
+		context = s.odin_ctx
+		append(&s.outputs_showing_window, output)
+		wl_update_scale_output(s)
+	},
+	leave = proc "c" (data: rawptr, surface: ^wl.Surface, output: ^wl.Output) {
+		s := (^WL_State)(data)
+		context = s.odin_ctx
+
+		#reverse for showing_output, showing_output_idx in s.outputs_showing_window {
+			if showing_output == output {
+				ordered_remove(&s.outputs_showing_window, showing_output_idx)
+			}
+		}
+
+		wl_update_scale_output(s)
+	},
+	preferred_buffer_scale = proc "c" (data: rawptr, surface: ^wl.Surface, factor: c.int32_t) {},
+	preferred_buffer_transform = proc "c" (data: rawptr, surface: ^wl.Surface, transform: u32) {},
 }
 
 seat_listener := wl.Seat_Listener {
 	capabilities = proc "c" (data: rawptr, seat: ^wl.Seat, capabilities: wl.Seat_Capabilities) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 
 		if .Pointer in capabilities {
@@ -375,7 +509,7 @@ seat_listener := wl.Seat_Listener {
 			}
 
 			s.pointer = wl.seat_get_pointer(seat)
-			wl.add_listener(s.pointer, &pointer_listener, nil)
+			wl.add_listener(s.pointer, &pointer_listener, s)
 			if s.cursor_shape_manager != nil {
 				s.cursor_shape_device = wl.cursor_shape_manager_get_pointer(
 					s.cursor_shape_manager,
@@ -397,7 +531,7 @@ seat_listener := wl.Seat_Listener {
 			}
 
 			s.keyboard = wl.seat_get_keyboard(seat)
-			wl.add_listener(s.keyboard, &keyboard_listener, nil)
+			wl.add_listener(s.keyboard, &keyboard_listener, s)
 		} else if s.keyboard != nil {
 			wl.keyboard_release(s.keyboard)
 			s.keyboard = nil
@@ -414,6 +548,7 @@ toplevel_listener := wl.XDG_Toplevel_Listener {
 		height: c.int32_t,
 		states: ^wl.Array,
 	) {
+		s := (^WL_State)(data)
 		w := int(width)
 		h := int(height)
 
@@ -491,6 +626,7 @@ toplevel_listener := wl.XDG_Toplevel_Listener {
 		s.configured = true
 	},
 	close = proc "c" (data: rawptr, xdg_toplevel: ^wl.XDG_Toplevel) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		append(&s.events, Event_Close_Window_Requested{})
 	},
@@ -519,6 +655,7 @@ keyboard_listener := wl.Keyboard_Listener {
 		fd: c.int32_t,
 		size: u32,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		defer linux.close(linux.Fd(fd))
 
@@ -557,6 +694,7 @@ keyboard_listener := wl.Keyboard_Listener {
 	},
 	enter = proc "c" (data: rawptr, keyboard: ^wl.Keyboard, serial: c.uint32_t, surface: ^wl.Surface, keys: ^wl.Array) {},
 	leave = proc "c" (data: rawptr, keyboard: ^wl.Keyboard, serial: c.uint32_t, surface: ^wl.Surface) {
+		s := (^WL_State)(data)
 		// Avoids key repeats happening forever, that state is cleared while the window is inactive.
 		s.repeat_key = .None
 	},
@@ -570,6 +708,7 @@ keyboard_listener := wl.Keyboard_Listener {
 		mods_locked: c.uint32_t,
 		group: c.uint32_t,
 	) {
+		s := (^WL_State)(data)
 		if s.xkb_state == nil {
 			return
 		}
@@ -582,6 +721,7 @@ keyboard_listener := wl.Keyboard_Listener {
 		rate: c.int32_t,
 		delay: c.int32_t,
 	) {
+		s := (^WL_State)(data)
 		s.repeat_rate = rate
 		s.repeat_delay = delay
 	},
@@ -595,6 +735,7 @@ key_handler :: proc "c" (
 	key: c.uint32_t,
 	state: c.uint32_t,
 ) {
+	s := (^WL_State)(data)
 	context = runtime.default_context()
 
 	// Wayland emits evdev events, and the keycodes are shifted
@@ -603,7 +744,7 @@ key_handler :: proc "c" (
 
 	switch state {
 	case wl.KEYBOARD_KEY_STATE_RELEASED:
-		key := key_from_xkeycode(keycode)
+		key := linux_xkeycode_to_k2key(keycode)
 
 		if s.repeat_xkb_keycode == keycode {
 			s.repeat_key = .None
@@ -616,7 +757,7 @@ key_handler :: proc "c" (
 		}
 
 	case wl.KEYBOARD_KEY_STATE_PRESSED:
-		key := key_from_xkeycode(keycode)
+		key := linux_xkeycode_to_k2key(keycode)
 
 		if key != .None {
 			append(&s.events, Event_Key_Went_Down {
@@ -624,7 +765,7 @@ key_handler :: proc "c" (
 			})
 		}
 
-		_wl_append_typed_runes(keycode)
+		_wl_append_typed_runes(s, keycode)
 
 		if key != .None && s.repeat_rate > 0 {
 			s.repeat_key = key
@@ -635,7 +776,7 @@ key_handler :: proc "c" (
 	}
 }
 
-_wl_append_typed_runes :: proc(keycode: c.uint32_t) {
+_wl_append_typed_runes :: proc(s: ^WL_State, keycode: c.uint32_t) {
 	if s.xkb_state == nil {
 		return
 	}
@@ -665,6 +806,7 @@ pointer_listener := wl.Pointer_Listener {
 		surface_x: wl.Fixed,
 		surface_y: wl.Fixed,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		s.pointer_enter_serial = u32(serial)
 
@@ -678,7 +820,7 @@ pointer_listener := wl.Pointer_Listener {
 			)
 		}
 
-		wl_apply_cursor()
+		wl_apply_cursor(s)
 	},
 	leave = proc "c" (
 		data: rawptr,
@@ -686,6 +828,7 @@ pointer_listener := wl.Pointer_Listener {
 		serial: c.uint32_t,
 		surface: ^wl.Surface,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 
 		if s.csd != nil {
@@ -699,6 +842,7 @@ pointer_listener := wl.Pointer_Listener {
 		surface_x: wl.Fixed,
 		surface_y: wl.Fixed,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 
 		if s.csd != nil && wlcsd_pointer_over_frame(s.csd) {
@@ -707,7 +851,7 @@ pointer_listener := wl.Pointer_Listener {
 			wlcsd_pointer_moved(s.csd, local_x, local_y)
 
 			if wlcsd_cursor(s.csd) != s.last_csd_cursor {
-				wl_apply_cursor()
+				wl_apply_cursor(s)
 			}
 
 			return
@@ -728,6 +872,7 @@ pointer_listener := wl.Pointer_Listener {
 		button: c.uint32_t,
 		state: c.uint32_t,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 
 		if s.csd != nil && wlcsd_pointer_over_frame(s.csd) {
@@ -784,6 +929,7 @@ pointer_listener := wl.Pointer_Listener {
 		axis: c.uint32_t,
 		value: wl.Fixed,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 
 		if s.csd != nil && wlcsd_pointer_over_frame(s.csd) {
@@ -841,9 +987,11 @@ fractional_scale_listener := wl.WP_Fractional_Scale_V1_Listener {
 		self: ^wl.WP_Fractional_Scale_V1,
 		scale: u32,
 	) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		scl := f32(scale)/120
 		s.scale = scl
+		wl_update_scale_output(s)
 		s.screen_width = int(f32(s.last_configure_width) * s.scale)
 		s.screen_height = int(f32(s.last_configure_height) * s.scale)
 
@@ -858,12 +1006,12 @@ fractional_scale_listener := wl.WP_Fractional_Scale_V1_Listener {
 		// The cursor theme is loaded at a fixed physical size, so it needs reloading whenever
 		// the scale changes.
 		if s.cursor_shape_device == nil {
-			wl_load_cursor_theme()
+			wl_load_cursor_theme(s)
 		}
 
 		// Makes any visible effect of the new scale (a rescaled custom cursor, or a reloaded
 		// theme cursor) happen instantly rather than waiting for the next pointer move.
-		wl_apply_cursor()
+		wl_apply_cursor(s)
 
 		append(&s.events, Event_Window_Scale_Changed {
 			scale = scl,
@@ -873,7 +1021,7 @@ fractional_scale_listener := wl.WP_Fractional_Scale_V1_Listener {
 	},
 }
 
-wl_shutdown :: proc() {
+wl_shutdown :: proc(s: ^WL_State) {
 	if s.csd != nil {
 		wlcsd_destroy(s.csd)
 	}
@@ -921,6 +1069,23 @@ wl_shutdown :: proc() {
 
 	delete(s.events)
 
+	for o in s.outputs {
+		wl_destroy_output(o)
+	}
+
+	delete(s.outputs)
+	delete(s.outputs_showing_window)
+
+	if s.xdg_output_manager != nil {
+		wl.zxdg_output_manager_v1_destroy(s.xdg_output_manager)
+	}
+
+	if s.output_order.output_order != nil {
+		wl.kde_output_order_v1_destroy(s.output_order.output_order)
+	}
+
+	delete(s.output_order.first_output, s.output_order.allocator)
+
 	if s.xkb_state != nil {
 		xkb.state_unref(s.xkb_state)
 	}
@@ -934,17 +1099,17 @@ wl_shutdown :: proc() {
 	}
 }
 
-wl_get_window_render_glue :: proc() -> ^Window_Render_Glue {
+wl_get_window_render_glue :: proc(s: ^WL_State) -> ^Window_Render_Glue {
 	return s.window_render_glue
 }
 
-wl_before_present :: proc() {
+wl_before_present :: proc(s: ^WL_State) {
 	if s.csd != nil {
 		wlcsd_paint(s.csd, s.scale)
 	}
 }
 
-wl_get_events :: proc(events: ^[dynamic]Event) {
+wl_get_events :: proc(s: ^WL_State, events: ^[dynamic]Event) {
 	wl.display_dispatch_pending(s.display)
 
 	// No key repeat events in wayland, we make them ourselves using timers using info reported by
@@ -964,7 +1129,7 @@ wl_get_events :: proc(events: ^[dynamic]Event) {
 				key = s.repeat_key,
 			})
 			
-			_wl_append_typed_runes(s.repeat_xkb_keycode)
+			_wl_append_typed_runes(s, s.repeat_xkb_keycode)
 			s.repeat_next_tick = time.tick_add(s.repeat_next_tick, interval)
 			repeats += 1
 
@@ -980,7 +1145,7 @@ wl_get_events :: proc(events: ^[dynamic]Event) {
 	runtime.clear(&s.events)
 }
 
-wl_set_title :: proc(title: string) {
+wl_set_title :: proc(s: ^WL_State, title: string) {
 	// Sets title in window list. Sets title on titlebar if using server-side decorations.
 	wl.xdg_toplevel_set_title(s.toplevel, strings.clone_to_cstring(title, frame_allocator))
 
@@ -989,24 +1154,24 @@ wl_set_title :: proc(title: string) {
 	}
 }
 
-wl_get_screen_width :: proc() -> int {
+wl_get_screen_width :: proc(s: ^WL_State) -> int {
 	return s.screen_width
 }
 
-wl_get_screen_height :: proc() -> int {
+wl_get_screen_height :: proc(s: ^WL_State) -> int {
 	return s.screen_height
 }
 
-wl_set_position :: proc(x: int, y: int) {
+wl_set_position :: proc(s: ^WL_State, x: int, y: int) {
 	log.error("set_position not implemented when using wayland")
 }
 
-wl_get_position :: proc() -> Vec2 {
+wl_get_position :: proc(s: ^WL_State) -> Vec2 {
 	log.error("get_position not implemented when using wayland")
 	return {}
 }
 
-wl_set_screen_size :: proc(w, h: int) {
+wl_set_screen_size :: proc(s: ^WL_State, w, h: int) {
 	s.screen_width = int(f32(w) * s.scale)
 	s.screen_height = int(f32(h) * s.scale)
 	s.last_configure_width = w
@@ -1029,12 +1194,17 @@ wl_set_screen_size :: proc(w, h: int) {
 	}
 }
 
-wl_get_window_scale :: proc() -> f32 {
+wl_get_window_scale :: proc(s: ^WL_State) -> f32 {
 	return s.scale
 }
 
-wl_set_window_mode :: proc(window_mode: Window_Mode) {
+wl_get_window_mode :: proc(s: ^WL_State) -> Window_Mode {
+	return s.window_mode
+}
+
+wl_set_window_mode :: proc(s: ^WL_State, window_mode: Window_Mode) {
 	s.window_mode = window_mode
+	s.fullscreen_output = nil
 	 
 	switch window_mode {
 	case .Windowed:
@@ -1067,7 +1237,521 @@ wl_set_window_mode :: proc(window_mode: Window_Mode) {
 	}
 }
 
-wl_set_window_icon :: proc(image: Image) -> bool {
+wl_get_monitors :: proc(s: ^WL_State, allocator: runtime.Allocator) -> []Monitor_Info {
+	if s != nil {
+		return wl_monitors_from_outputs(s.outputs[:], s.output_order.first_output, allocator)
+	}
+
+	// The remainder is valid when this is called before `init` runs.
+
+	Query :: struct {
+		ctx: runtime.Context,
+		temp_allocator: runtime.Allocator,
+		outputs: [dynamic]^WL_Output,
+		xdg_output_manager: ^wl.ZXDG_Output_Manager_V1,
+		output_order: WL_Output_Order,
+	}
+
+	query_registry_listener := wl.Registry_Listener {
+		global = proc "c" (
+			data: rawptr,
+			registry: ^wl.Registry,
+			name: u32,
+			interface: cstring,
+			version: u32,
+		) {
+			q := (^Query)(data)
+			context = q.ctx
+
+			switch interface {
+			case wl.output_interface.name:
+				o := wl_bind_output(registry, name, version, q.xdg_output_manager, q.temp_allocator)
+				append(&q.outputs, o)
+
+			case wl.zxdg_output_manager_v1_interface.name:
+				q.xdg_output_manager = wl.registry_bind(
+					wl.ZXDG_Output_Manager_V1,
+					registry,
+					name,
+					&wl.zxdg_output_manager_v1_interface,
+					version,
+				)
+
+				for o in q.outputs {
+					wl_add_xdg_output(o, q.xdg_output_manager)
+				}
+
+			case wl.kde_output_order_v1_interface.name:
+				wl_bind_output_order(&q.output_order, registry, name, version)
+			}
+		},
+		global_remove = proc "c" (data: rawptr, registry: ^wl.Registry, name: u32) {},
+	}
+
+	display := wl.display_connect(nil)
+
+	if display == nil {
+		log.error("Failed listing monitors: Could not connect to the Wayland compositor.")
+		return nil
+	}
+
+	temp_arena: runtime.Arena
+	temp_allocator := runtime.arena_allocator(&temp_arena)
+
+	q := Query {
+		ctx = context,
+		temp_allocator = temp_allocator,
+		outputs = make([dynamic]^WL_Output, temp_allocator),
+		output_order = {
+			ctx = context,
+			allocator = temp_allocator,
+		},
+	}
+
+	registry := wl.display_get_registry(display)
+	wl.add_listener(registry, &query_registry_listener, &q)
+
+	wl.display_roundtrip(display)
+	wl.display_roundtrip(display)
+
+	monitors := wl_monitors_from_outputs(q.outputs[:], q.output_order.first_output, allocator)
+
+	for o in q.outputs {
+		wl_destroy_output(o)
+	}
+
+	if q.xdg_output_manager != nil {
+		wl.zxdg_output_manager_v1_destroy(q.xdg_output_manager)
+	}
+
+	if q.output_order.output_order != nil {
+		wl.kde_output_order_v1_destroy(q.output_order.output_order)
+	}
+
+	wl.destroy(registry)
+	wl.display_disconnect(display)
+	runtime.arena_destroy(&temp_arena)
+	return monitors
+}
+
+wl_monitors_from_outputs :: proc(
+	outputs: []^WL_Output,
+	primary_connector: string,
+	allocator: runtime.Allocator,
+) -> []Monitor_Info {
+	monitors := make([dynamic]Monitor_Info, 0, len(outputs), allocator)
+	has_primary := false
+
+	for o in outputs {
+		rotated :=
+			o.transform == wl.OUTPUT_TRANSFORM_90 ||
+			o.transform == wl.OUTPUT_TRANSFORM_270 ||
+			o.transform == wl.OUTPUT_TRANSFORM_FLIPPED_90 ||
+			o.transform == wl.OUTPUT_TRANSFORM_FLIPPED_270
+
+		size := o.mode_size
+		physical_size := o.physical_size
+
+		if rotated {
+			size = {size.y, size.x}
+			physical_size = {physical_size.y, physical_size.x}
+		}
+
+		position := o.geometry_position
+
+		if o.xdg_output != nil && o.logical_size.x > 0 {
+			position = o.logical_position
+		}
+
+		name := o.description
+
+		if name == "" {
+			name = o.xdg_description
+		}
+
+		if name == "" {
+			name = o.connector
+		}
+
+		if name == "" {
+			name = o.make_and_model
+		}
+
+		name_clone, name_clone_err := strings.clone(name, allocator)
+
+		if name_clone_err != nil {
+			log.errorf("Failed listing monitors: Copying the name failed with %v", name_clone_err)
+
+			for m in monitors {
+				delete(m.name, allocator)
+			}
+
+			delete(monitors)
+			return nil
+		}
+
+		primary := primary_connector != "" && o.connector == primary_connector
+
+		if primary {
+			has_primary = true
+		}
+
+		append(&monitors, Monitor_Info {
+			id = Monitor_Id(o.registry_name),
+			name = name_clone,
+			position = position,
+			size = size,
+			physical_size = physical_size,
+			scale = wl_output_scale(o),
+			primary = primary,
+		})
+	}
+
+	if !has_primary && len(monitors) > 0 {
+		closest_to_origin_idx := 0
+
+		for m, i in monitors {
+			closest_to_origin := monitors[closest_to_origin_idx].position
+			closest_to_origin_dist := closest_to_origin.x*closest_to_origin.x + closest_to_origin.y*closest_to_origin.y
+			origin_dist := m.position.x*m.position.x + m.position.y*m.position.y
+
+			if origin_dist < closest_to_origin_dist {
+				closest_to_origin_idx = i
+			}
+		}
+
+		monitors[closest_to_origin_idx].primary = true
+	}
+
+	return monitors[:]
+}
+
+WL_Output :: struct {
+	ctx: runtime.Context,
+	allocator: runtime.Allocator,
+	registry_name: u32,
+	output: ^wl.Output,
+	xdg_output: ^wl.ZXDG_Output_V1,
+	geometry_position: [2]int,
+	physical_size: [2]int,
+	transform: c.int32_t,
+	mode_size: [2]int,
+	integer_scale: int,
+	logical_position: [2]int,
+	logical_size: [2]int,
+	connector: string,
+	description: string,
+	xdg_description: string,
+	make_and_model: string,
+}
+
+wl_bind_output :: proc(
+	registry: ^wl.Registry,
+	name: u32,
+	version: u32,
+	xdg_output_manager: ^wl.ZXDG_Output_Manager_V1,
+	allocator: runtime.Allocator,
+) -> ^WL_Output {
+	o := new(WL_Output, allocator)
+	o.ctx = context
+	o.allocator = allocator
+	o.registry_name = name
+	o.integer_scale = 1
+	o.output = wl.registry_bind(
+		wl.Output,
+		registry,
+		name,
+		&wl.output_interface,
+		version,
+	)
+	wl.add_listener(o.output, &wl_output_listener, o)
+
+	if xdg_output_manager != nil {
+		wl_add_xdg_output(o, xdg_output_manager)
+	}
+
+	return o
+}
+
+wl_add_xdg_output :: proc(o: ^WL_Output, xdg_output_manager: ^wl.ZXDG_Output_Manager_V1) {
+	if o.xdg_output != nil {
+		return
+	}
+
+	o.xdg_output = wl.zxdg_output_manager_v1_get_xdg_output(xdg_output_manager, o.output)
+	wl.add_listener(o.xdg_output, &wl_xdg_output_listener, o)
+}
+
+wl_destroy_output :: proc(o: ^WL_Output) {
+	if o.xdg_output != nil {
+		wl.zxdg_output_v1_destroy(o.xdg_output)
+	}
+
+	if wl.proxy_get_version(o.output) >= 3 {
+		wl.output_release(o.output)
+	} else {
+		wl.destroy(o.output)
+	}
+
+	delete(o.connector, o.allocator)
+	delete(o.description, o.allocator)
+	delete(o.xdg_description, o.allocator)
+	delete(o.make_and_model, o.allocator)
+	free(o, o.allocator)
+}
+
+wl_output_listener := wl.Output_Listener {
+	geometry = proc "c" (
+		data: rawptr,
+		output: ^wl.Output,
+		x: c.int32_t,
+		y: c.int32_t,
+		physical_width: c.int32_t,
+		physical_height: c.int32_t,
+		subpixel: c.int32_t,
+		make: cstring,
+		model: cstring,
+		transform: c.int32_t,
+	) {
+		o := (^WL_Output)(data)
+		context = o.ctx
+		o.geometry_position = {int(x), int(y)}
+		o.physical_size = {int(physical_width), int(physical_height)}
+		o.transform = transform
+		delete(o.make_and_model, o.allocator)
+		o.make_and_model = fmt.aprintf("%s %s", make, model, allocator = o.allocator)
+	},
+	mode = proc "c" (
+		data: rawptr,
+		output: ^wl.Output,
+		flags: u32,
+		width: c.int32_t,
+		height: c.int32_t,
+		refresh: c.int32_t,
+	) {
+		o := (^WL_Output)(data)
+
+		if flags & wl.OUTPUT_MODE_CURRENT != 0 {
+			o.mode_size = {int(width), int(height)}
+		}
+	},
+	done = proc "c" (data: rawptr, output: ^wl.Output) {},
+	scale = proc "c" (data: rawptr, output: ^wl.Output, factor: c.int32_t) {
+		o := (^WL_Output)(data)
+		o.integer_scale = int(factor)
+	},
+	name = proc "c" (data: rawptr, output: ^wl.Output, name: cstring) {
+		o := (^WL_Output)(data)
+		context = o.ctx
+		delete(o.connector, o.allocator)
+		o.connector = strings.clone_from_cstring(name, o.allocator)
+	},
+	description = proc "c" (data: rawptr, output: ^wl.Output, description: cstring) {
+		o := (^WL_Output)(data)
+		context = o.ctx
+		delete(o.description, o.allocator)
+		o.description = strings.clone_from_cstring(description, o.allocator)
+	},
+}
+
+wl_xdg_output_listener := wl.ZXDG_Output_V1_Listener {
+	logical_position = proc "c" (
+		data: rawptr,
+		self: ^wl.ZXDG_Output_V1,
+		x: c.int32_t,
+		y: c.int32_t,
+	) {
+		o := (^WL_Output)(data)
+		o.logical_position = {int(x), int(y)}
+	},
+	logical_size = proc "c" (
+		data: rawptr,
+		self: ^wl.ZXDG_Output_V1,
+		width: c.int32_t,
+		height: c.int32_t,
+	) {
+		o := (^WL_Output)(data)
+		o.logical_size = {int(width), int(height)}
+	},
+	done = proc "c" (data: rawptr, self: ^wl.ZXDG_Output_V1) {},
+	name = proc "c" (data: rawptr, self: ^wl.ZXDG_Output_V1, name: cstring) {
+		o := (^WL_Output)(data)
+		context = o.ctx
+
+		if o.connector == "" {
+			o.connector = strings.clone_from_cstring(name, o.allocator)
+		}
+	},
+	description = proc "c" (data: rawptr, self: ^wl.ZXDG_Output_V1, description: cstring) {
+		o := (^WL_Output)(data)
+		context = o.ctx
+		delete(o.xdg_description, o.allocator)
+		o.xdg_description = strings.clone_from_cstring(description, o.allocator)
+	},
+}
+
+WL_Output_Order :: struct {
+	ctx: runtime.Context,
+	allocator: runtime.Allocator,
+	output_order: ^wl.KDE_Output_Order_V1,
+	first_output: string,
+	receiving: bool,
+}
+
+wl_bind_output_order :: proc(
+	order: ^WL_Output_Order,
+	registry: ^wl.Registry,
+	name: u32,
+	version: u32,
+) {
+	order.output_order = wl.registry_bind(
+		wl.KDE_Output_Order_V1,
+		registry,
+		name,
+		&wl.kde_output_order_v1_interface,
+		version,
+	)
+
+	wl.add_listener(order.output_order, &wl_output_order_listener, order)
+}
+
+wl_output_order_listener := wl.KDE_Output_Order_V1_Listener {
+	output = proc "c" (data: rawptr, self: ^wl.KDE_Output_Order_V1, output_name: cstring) {
+		order := (^WL_Output_Order)(data)
+		context = order.ctx
+
+		if !order.receiving {
+			delete(order.first_output, order.allocator)
+			order.first_output = strings.clone_from_cstring(output_name, order.allocator)
+			order.receiving = true
+		}
+	},
+	done = proc "c" (data: rawptr, self: ^wl.KDE_Output_Order_V1) {
+		order := (^WL_Output_Order)(data)
+		order.receiving = false
+	},
+}
+
+wl_output_scale :: proc(o: ^WL_Output) -> f32 {
+	if o.xdg_output == nil || o.logical_size.x <= 0 {
+		return f32(o.integer_scale)
+	}
+
+	rotated :=
+		o.transform == wl.OUTPUT_TRANSFORM_90 ||
+		o.transform == wl.OUTPUT_TRANSFORM_270 ||
+		o.transform == wl.OUTPUT_TRANSFORM_FLIPPED_90 ||
+		o.transform == wl.OUTPUT_TRANSFORM_FLIPPED_270
+
+	width := rotated ? o.mode_size.y : o.mode_size.x
+	return math.round(f32(width) / f32(o.logical_size.x) * 120) / 120
+}
+
+wl_update_scale_output :: proc(s: ^WL_State) {
+	current_showing := false
+	current_scale_matches := false
+	last_matching: ^wl.Output
+	highest_scale_output: ^wl.Output
+	highest_scale: f32
+
+	for showing_output in s.outputs_showing_window {
+		for o in s.outputs {
+			if o.output != showing_output {
+				continue
+			}
+
+			output_scale := wl_output_scale(o)
+			scale_matches := output_scale == s.scale
+
+			if showing_output == s.scale_output {
+				current_showing = true
+				current_scale_matches = scale_matches
+			}
+
+			if scale_matches {
+				last_matching = showing_output
+			}
+
+			if highest_scale_output == nil || output_scale > highest_scale {
+				highest_scale_output = showing_output
+				highest_scale = output_scale
+			}
+		}
+	}
+
+	if current_showing && current_scale_matches {
+		return
+	}
+
+	if last_matching != nil {
+		s.scale_output = last_matching
+		return
+	}
+
+	if highest_scale_output != nil {
+		s.scale_output = highest_scale_output
+	}
+}
+
+wl_get_window_monitor :: proc(s: ^WL_State) -> Monitor_Id {
+	window_output := s.scale_output
+
+	if s.window_mode == .Borderless_Fullscreen && s.fullscreen_output != nil {
+		window_output = s.fullscreen_output
+	}
+
+	if s.window_mode == .Borderless_Fullscreen && s.fullscreen_output == nil {
+		window_size := [2]int{s.last_configure_width, s.last_configure_height}
+
+		for showing_output in s.outputs_showing_window {
+			for o in s.outputs {
+				// The extra logical size check is here because the "showing_output" check sometimes
+				// is true when it shouldn't be.
+				if o.output == showing_output && o.logical_size == window_size {
+					window_output = showing_output
+				}
+			}
+		}
+	}
+
+	for o in s.outputs {
+		if o.output == window_output {
+			return Monitor_Id(o.registry_name)
+		}
+	}
+
+	return MONITOR_NONE
+}
+
+wl_set_window_monitor :: proc(s: ^WL_State, monitor: Monitor_Id) {
+	output := wl_find_output(s, monitor)
+
+	if output == nil {
+		log.errorf("Cannot move window to monitor %v, it does not exist.", monitor)
+		return
+	}
+
+	if s.window_mode != .Borderless_Fullscreen {
+		log.error("Cannot move a non-fullscreen window to another monitor when using Wayland.")
+		return
+	}
+
+	wl.xdg_toplevel_unset_fullscreen(s.toplevel)
+	wl.xdg_toplevel_set_fullscreen(s.toplevel, output)
+	s.fullscreen_output = output
+}
+
+wl_find_output :: proc(s: ^WL_State, monitor: Monitor_Id) -> ^wl.Output {
+	for o in s.outputs {
+		if Monitor_Id(o.registry_name) == monitor {
+			return o.output
+		}
+	}
+
+	return nil
+}
+
+wl_set_window_icon :: proc(s: ^WL_State, image: Image) -> bool {
 	if s.csd != nil {
 		wlcsd_set_icon(s.csd, image)
 
@@ -1084,7 +1768,7 @@ wl_set_window_icon :: proc(image: Image) -> bool {
 
 	// The protocol only takes square buffers. A non-square image goes in the middle of one.
 	size := max(image.width, image.height)
-	dest, dest_ok := wl_create_shared_memory_image("karl2d-icon", size, size)
+	dest, dest_ok := wl_create_shared_memory_image(s.shm, "karl2d-icon", size, size)
 
 	if !dest_ok {
 		return false
@@ -1128,17 +1812,18 @@ wl_destroy_toplevel_icon :: proc(icon: WL_Toplevel_Icon) {
 	wl_destroy_shared_memory_image(icon.image)
 }
 
-wl_set_cursor_hidden :: proc(hidden: bool) {
+wl_set_cursor_hidden :: proc(s: ^WL_State, hidden: bool) {
 	s.cursor_hidden = hidden
-	wl_apply_cursor()
+	wl_apply_cursor(s)
 }
 
-wl_is_cursor_hidden :: proc() -> bool {
+wl_is_cursor_hidden :: proc(s: ^WL_State) -> bool {
 	return s.cursor_hidden
 }
 
 locked_pointer_listener := wl.ZWP_Locked_Pointer_V1_Listener {
 	locked = proc "c"(data: rawptr, lp: ^wl.ZWP_Locked_Pointer_V1) {
+		s := (^WL_State)(data)
 		context = s.odin_ctx
 		s.locked_pointer = lp
 		cx := f32(s.screen_width / 2)
@@ -1146,6 +1831,7 @@ locked_pointer_listener := wl.ZWP_Locked_Pointer_V1_Listener {
 		append(&s.events, Event_Mouse_Teleported { position = {cx, cy} })
 	},
 	unlocked = proc "c"(data: rawptr, lp: ^wl.ZWP_Locked_Pointer_V1) {
+		s := (^WL_State)(data)
 		s.locked_pointer = nil
 	},
 }
@@ -1157,6 +1843,7 @@ relative_pointer_listener := wl.ZWP_Relative_Pointer_V1_Listener {
 		t_hi, t_lo: c.uint32_t,
 		dx, dy, dx_unaccel, dy_unaccel: wl.Fixed,
 	) {
+		s := (^WL_State)(data)
 		// Only used when pointer is locked! Makes mouse move events and teleports it back to center
 		if s.locked_pointer == nil {
 			return
@@ -1176,7 +1863,7 @@ relative_pointer_listener := wl.ZWP_Relative_Pointer_V1_Listener {
 	},
 }
 
-wl_set_mouse_locked :: proc(locked: bool) {
+wl_set_mouse_locked :: proc(s: ^WL_State, locked: bool) {
 	if locked {
 		if s.locked_pointer != nil {
 			return
@@ -1187,7 +1874,7 @@ wl_set_mouse_locked :: proc(locked: bool) {
 			wl.ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT,
 		)
 
-		wl.add_listener(s.locked_pointer, &locked_pointer_listener, nil)
+		wl.add_listener(s.locked_pointer, &locked_pointer_listener, s)
 
 		// Makes sure we have the correct "previous position".
 		cx := f32(s.screen_width / 2)
@@ -1203,13 +1890,13 @@ wl_set_mouse_locked :: proc(locked: bool) {
 	}
 }
 
-wl_is_mouse_locked :: proc() -> bool {
+wl_is_mouse_locked :: proc(s: ^WL_State) -> bool {
 	return s.locked_pointer != nil
 }
 
 // Use as a fallback when wp_cursor_shape_manager_v1 is missing. Scales the cursor by the DPI scale.
 // Since the scale is explicitly used, this is re-run when the scale changes.
-wl_load_cursor_theme :: proc() {
+wl_load_cursor_theme :: proc(s: ^WL_State) {
 	if s.cursor_theme != nil {
 		wl.cursor_theme_destroy(s.cursor_theme)
 	}
@@ -1220,7 +1907,7 @@ wl_load_cursor_theme :: proc() {
 
 // Sets cursor based on both `s.cursor_hidden` and `s.current_cursor`. Re-entering window reruns
 // this proc, since it is forgotten when the cursor leaves the window.
-wl_apply_cursor :: proc() {
+wl_apply_cursor :: proc(s: ^WL_State) {
 	if s.pointer == nil || s.cursor_surface == nil {
 		return
 	}
@@ -1252,7 +1939,7 @@ wl_apply_cursor :: proc() {
 			// The scale can change while the game runs, for instance when the window is dragged to a
 			// monitor with different DPI settings.
 			if cc.built_for_scale != s.scale {
-				wl_apply_cursor_scale(cc)
+				wl_apply_cursor_scale(s, cc)
 			}
 			
 			wl.pointer_set_cursor(
@@ -1305,7 +1992,6 @@ wl_apply_cursor :: proc() {
 	}
 }
 
-@(private="package")
 WL_Shared_Memory_Image :: struct {
 	buffer: ^wl.Buffer,
 	pixels: []u32,
@@ -1317,8 +2003,8 @@ WL_Shared_Memory_Image :: struct {
 // separate process, so this uses handles and stuff to make it possible to for it to read it.
 //
 // `name` shows up in /proc/.../fd for debugging.
-@(private="package")
 wl_create_shared_memory_image :: proc(
+	shm: ^wl.SHM,
 	name: cstring,
 	width: int,
 	height: int,
@@ -1349,7 +2035,7 @@ wl_create_shared_memory_image :: proc(
 		return
 	}
 
-	pool := wl.shm_create_pool(s.shm, c.int32_t(fd), c.int32_t(size))
+	pool := wl.shm_create_pool(shm, c.int32_t(fd), c.int32_t(size))
 
 	buffer := wl.shm_pool_create_buffer(
 		pool,
@@ -1374,7 +2060,6 @@ wl_create_shared_memory_image :: proc(
 	return image, true
 }
 
-@(private="package")
 wl_destroy_shared_memory_image :: proc(image: WL_Shared_Memory_Image) {
 	if image.buffer != nil {
 		wl.buffer_destroy(image.buffer)
@@ -1385,8 +2070,15 @@ wl_destroy_shared_memory_image :: proc(image: WL_Shared_Memory_Image) {
 	}
 }
 
-wl_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) {
-	dest, dest_ok := wl_create_shared_memory_image("cursor", image.width, image.height)
+wl_create_custom_cursor :: proc(
+	s: ^WL_State,
+	image: Image,
+	hotspot: [2]int,
+) -> (
+	Custom_Cursor,
+	bool,
+) {
+	dest, dest_ok := wl_create_shared_memory_image(s.shm, "cursor", image.width, image.height)
 
 	if !dest_ok {
 		return {}, false
@@ -1414,7 +2106,7 @@ wl_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor
 		viewport = wl.wp_viewporter_get_viewport(s.viewporter, surface),
 	}
 
-	wl_apply_cursor_scale(&cursor)
+	wl_apply_cursor_scale(s, &cursor)
 
 	handle, add_err := hm.add(&s.custom_cursors, cursor)
 
@@ -1431,7 +2123,7 @@ wl_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor
 
 // The image used by cursors are scaled the window scale. But the size given to compositor needs to
 // be the unscaled size. So this unscales the cursor and uses a wayland viewport to scale it.
-wl_apply_cursor_scale :: proc(cursor: ^WL_Cursor) {
+wl_apply_cursor_scale :: proc(s: ^WL_State, cursor: ^WL_Cursor) {
 	// A destination of zero is a protocol error, so tiny cursors stay at one logical pixel.
 	dest_width := max(1, int(math.round(f32(cursor.width) / s.scale)))
 	dest_height := max(1, int(math.round(f32(cursor.height) / s.scale)))
@@ -1442,7 +2134,7 @@ wl_apply_cursor_scale :: proc(cursor: ^WL_Cursor) {
 	cursor.built_for_scale = s.scale
 }
 
-wl_set_cursor :: proc(cursor: Cursor) {
+wl_set_cursor :: proc(s: ^WL_State, cursor: Cursor) {
 	// Reject a stale handle, so a programming error leaves the cursor alone.
 	if handle, is_custom := cursor.(Custom_Cursor); is_custom {
 		if hm.get(&s.custom_cursors, handle) == nil {
@@ -1452,7 +2144,7 @@ wl_set_cursor :: proc(cursor: Cursor) {
 	}
 
 	s.current_cursor = cursor
-	wl_apply_cursor()
+	wl_apply_cursor(s)
 }
 
 wl_standard_cursor_shape :: proc(standard: Standard_Cursor) -> wl.WP_Cursor_Shape {
@@ -1474,7 +2166,7 @@ wl_standard_cursor_shape :: proc(standard: Standard_Cursor) -> wl.WP_Cursor_Shap
 	return .Default
 }
 
-wl_destroy_custom_cursor :: proc(custom_cursor: Custom_Cursor) {
+wl_destroy_custom_cursor :: proc(s: ^WL_State, custom_cursor: Custom_Cursor) {
 	cd := hm.get(&s.custom_cursors, custom_cursor)
 
 	if cd == nil {
@@ -1492,12 +2184,7 @@ wl_destroy_custom_cursor :: proc(custom_cursor: Custom_Cursor) {
 	hm.remove(&s.custom_cursors, custom_cursor)
 
 	// Falls back to the default if that was the cursor on screen.
-	wl_apply_cursor()
-}
-
-wl_set_internal_state :: proc(state: rawptr) {
-	assert(state != nil)
-	s = (^WL_State)(state)
+	wl_apply_cursor(s)
 }
 
 WL_Toplevel_Icon :: struct {
@@ -1524,6 +2211,7 @@ WL_Cursor :: struct {
 }
 
 WL_State :: struct {
+	using _: Linux_Window_State,
 	allocator: runtime.Allocator,
 
 	screen_width: int,
@@ -1588,10 +2276,17 @@ WL_State :: struct {
 	current_cursor: Cursor,
 
 	cursor_shape_manager: ^wl.WP_Cursor_Shape_Manager_V1,
-	cursor_shape_device:  ^wl.WP_Cursor_Shape_Device_V1,
+	cursor_shape_device: ^wl.WP_Cursor_Shape_Device_V1,
 
 	toplevel_icon_manager: ^wl.XDG_Toplevel_Icon_Manager_V1,
 	toplevel_icon: WL_Toplevel_Icon,
+
+	outputs: [dynamic]^WL_Output,
+	outputs_showing_window: [dynamic]^wl.Output,
+	scale_output: ^wl.Output,
+	fullscreen_output: ^wl.Output,
+	xdg_output_manager: ^wl.ZXDG_Output_Manager_V1,
+	output_order: WL_Output_Order,
 
 	// True if toplevel_listener.configure has run
 	configured: bool,
@@ -1612,5 +2307,3 @@ WL_State :: struct {
 	repeat_xkb_keycode: c.uint32_t,
 	repeat_next_tick: time.Tick,
 }
-
-s: ^WL_State

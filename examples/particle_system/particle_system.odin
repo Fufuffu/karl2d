@@ -336,7 +336,7 @@ color_lerp :: proc(initial: k2.Color, target: k2.Color, t: f32) -> k2.Color {
 @(private = "file")
 Sprite_Batch :: struct {
 	state:        ^k2.State,
-	texture:      k2.Texture_Handle,
+	texture:      k2.Texture,
 	uvs:          [6]k2.Vec2,
 	pos_offset:   int,
 	uv_offset:    int,
@@ -350,7 +350,7 @@ sprite_batch_begin :: proc(
 	texture: k2.Texture,
 	source: k2.Rect,
 ) -> Sprite_Batch {
-	ts := k2.Vec2{f32(texture.width), f32(texture.height)}
+	ts := k2.get_texture_size(texture)
 	up := k2.Vec2{source.x, source.y} / ts
 	us := k2.Vec2{source.w, source.h} / ts
 
@@ -358,7 +358,7 @@ sprite_batch_begin :: proc(
 
 	batch: Sprite_Batch
 	batch.state = state
-	batch.texture = texture.handle
+	batch.texture = texture
 	batch.uvs = {up, up + {us.x, 0}, up + us, up, up + us, up + {0, us.y}}
 	batch.pos_offset = shd.default_input_offsets[.Position]
 	batch.uv_offset = shd.default_input_offsets[.UV]
@@ -379,7 +379,7 @@ sprite_batch_add :: proc(
 	vsz := batch.vertex_size
 
 	// Register these vertices with the draw call and flush if the buffer is full.
-	k2._prepare_draw(batch.texture, 6)
+	k2._begin_textured_draw(hm.get(&state.textures, batch.texture), 6)
 
 	tl, tr, bl, br: k2.Vec2
 

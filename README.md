@@ -6,6 +6,16 @@ See [karl2d.doc.odin](https://github.com/karl-zylinski/karl2d/blob/master/karl2d
 
 Support the project by becoming a sponsor here on [GitHub](https://github.com/sponsors/karl-zylinski) or on [Patreon](https://patreon.com/karl_zylinski).
 
+## Features
+
+- Load and draw textures
+- Draw geometric shapes
+- Cameras for moving, rotating and scaling the view
+- Audio playback of audio clips and music
+- Support for mouse, keyboard and gamepad
+- Platforms: Windows, Linux, Mac, Web
+- Touch support on web
+
 ## Getting started
 
 1. Install the Odin compiler using the instructions on [odin-lang.org](https://odin-lang.org)
@@ -33,16 +43,6 @@ main :: proc() {
 6. A simple program that just shows the word "Hellope!" will appear. See the examples below for ideas on what to do next, or read [karl2d.doc.odin](https://github.com/karl-zylinski/karl2d/blob/master/karl2d.doc.odin) for an API overview.
 7. Enjoy!
 8. If you want to make a web build of your game, continue to the [Making a web build](#making-a-web-build) section below.
-
->[!NOTE]
->Call `k2.init` before using Karl2D procedures that query or modify runtime state,
->such as window size, input, drawing, audio, textures, fonts or shaders. Pure helper
->procedures, types and constants can be used before `k2.init`.
-
->[!NOTE]
->On *Linux*, you may run into build errors due to missing dependencies. Exactly what you need to install may vary from distribution to distribution. On Ubuntu / Debian, something like this may help:
->`sudo apt install libudev-dev`
->Did you have to install something else on your distro? Let me know!
 
 ## Get help
 
@@ -173,26 +173,11 @@ The `$` in front of the `name` parameter ensures that you're passing a compile-t
 ## Hot reload
 Some kind of gameplay code hot reload is planned as part of the library. Currently, there is an experimental implementation of this in a separate repository: https://github.com/karl-zylinski/karl2d-hot-reload-template
 
-## Beta 3
+## Beta status and roadmap
 
-Karl2D is currently in its THIRD BETA period. If you find _any_ issues, then please create an issue here on GitHub!
+Karl2D is currently is currently in beta. If you find _any_ issues, then please create an issue here on GitHub!
 
-Beta 3 has these features:
-- Rendering of shapes, textures and text with automatic batching
-- Audio playback using custom software mixer
-- Support for shaders and cameras
-- Windows support (D3D11 and OpenGL)
-- Mac support (OpenGL)
-- Linux support (OpenGL)
-- Web support (WebGL, no emscripten needed!)
-- Input: Mouse, keyboard, gamepad
-
-## Roadmap
-
-- [Beta 4: Rendering improvements](https://github.com/karl-zylinski/karl2d/milestone/3)
-- [Beta 5: Metal backend](https://github.com/karl-zylinski/karl2d/milestone/4)
-- [Beta 6: Cross-API shader compiler](https://github.com/karl-zylinski/karl2d/milestone/5)
-- 1.0
+For the roadmap of future releases, please see to the [milestones](https://github.com/karl-zylinski/karl2d/milestones)
 
 ## Architecture notes
 
@@ -211,11 +196,5 @@ The audio support in Karl2D is done using a software mixer that is part of `karl
 The web builds do not need emscripten, instead I've written a WebGL backend and make use of the official Odin JS runtime.
 
 On Linux there are two windowing systems to choose between: `x11` and `wayland`. Karl2D dynamically opens their shared libraries and tries to connect to them, first it tries wayland, and then x11. Therefore it does not need both to be installed to launch. It is all handled at runtime. End users can define the environment variable `KARL2D_LINUX_WINDOWING=x11/wayland` if they need to override it (usually for troubleshooting).
-
-## Contributing and Pull Request rules
-
-Are you interested in helping with Karl2D development? Thank you! You can look at open issues here on GitHub. You get your contributions into the project using a Pull Request.
-
-You can always open a _draft_ Pull Request and work on your stuff in there. There are no rules for draft pull requests. When you want to turn your draft into a ready-for-review Pull Request, then please follow this rule checklist: https://github.com/karl-zylinski/karl2d/blob/master/.github/pull_request_template.md
 
 ## Have fun!

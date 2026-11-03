@@ -1,11 +1,12 @@
 #+build linux
-#+private file
+#+private package
 #+vet explicit-allocators
 
 package karl2d
 
 import "base:runtime"
 import "log"
+import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:sys/linux"
@@ -15,23 +16,25 @@ import "platform_bindings/linux/udev"
 import "platform_bindings/linux/evdev"
 import "core:time"
 
-@(private="package")
 PLATFORM_LINUX :: Platform_Interface {
-	state_size = linux_state_size,
 	init = linux_init,
 	shutdown = linux_shutdown,
 	get_window_render_glue = linux_get_window_render_glue,
 	get_events = linux_get_events,
 	before_present = linux_before_present,
 	set_window_title = linux_set_window_title,
-	set_screen_size = set_screen_size,
+	set_screen_size = linux_set_screen_size,
 	get_screen_width = linux_get_screen_width,
 	get_screen_height = linux_get_screen_height,
 	set_window_position = linux_set_window_position,
 	get_window_position = linux_get_window_position,
 	get_window_scale = linux_get_window_scale,
 	set_window_mode = linux_set_window_mode,
+	get_window_mode = linux_get_window_mode,
 	set_window_icon = linux_set_window_icon,
+	get_monitors = linux_get_monitors,
+	get_window_monitor = linux_get_window_monitor,
+	set_window_monitor = linux_set_window_monitor,
 	set_cursor_hidden = linux_set_cursor_hidden,
 	is_cursor_hidden = linux_is_cursor_hidden,
 	set_mouse_locked = linux_set_mouse_locked,
@@ -43,89 +46,39 @@ PLATFORM_LINUX :: Platform_Interface {
 	get_gamepad_axis = linux_get_gamepad_axis,
 	set_gamepad_vibration = linux_set_gamepad_vibration,
 	open_url = linux_open_url,
-	set_internal_state = linux_set_internal_state,
-}
-
-s: ^Linux_State
-
-linux_state_size :: proc() -> int {
-	return size_of(Linux_State)
 }
 
 linux_init :: proc(
-	platform_state: rawptr,
+	s: ^Linux_State,
 	screen_width: int,
 	screen_height: int,
 	window_title: string,
 	options: Init_Options,
 	allocator: runtime.Allocator,
 ) {
-	assert(platform_state != nil)
-	s = (^Linux_State)(platform_state)
 	s.allocator = allocator
 	
-	// We pick windowing system by trying to to actually load it. This means trying to runetime-load
-	// the required shared libraries.
-	first_windowing := LINUX_WINDOW_WAYLAND
-	second_windowing := LINUX_WINDOW_X11
+	win, win_failure_reason, win_ok := linux_choose_windowing(frame_allocator)
 
-	// The player can force Karl2D to try another windowing system first.
-	preference_given := false
-	windowing_preference := os.get_env("KARL2D_LINUX_WINDOWING", frame_allocator)
-
-	switch windowing_preference {
-	case "":
-
-	case "wayland":
-		preference_given = true
-
-	case "x11":
-		first_windowing = LINUX_WINDOW_X11
-		second_windowing = LINUX_WINDOW_WAYLAND
-		preference_given = true
-
-	case:
-		log.warnf(
-			"Ignoring KARL2D_LINUX_WINDOWING=%v. It has to be \"wayland\" or \"x11\".",
-			windowing_preference,
-		)
+	if !win_ok {
+		log.panic(win_failure_reason)
 	}
 
-	s.win = first_windowing
-	first_windowing_err, first_windowing_ok := s.win.try_load(frame_allocator)
+	s.win = win
+	win_state_type := type_info_of(s.win.state_type)
 
-	if !first_windowing_ok {
-		s.win = second_windowing
-		second_windowing_err, second_windowing_ok := s.win.try_load(frame_allocator)
-
-		if !second_windowing_ok {
-			// The reasons go in the panic itself rather than only in the log above it: a game
-			// that raises the log level past info would otherwise be told to read reasons that
-			// were never printed.
-			log.panicf(
-				"Found neither Wayland nor X11. Karl2D needs one of them. %s %s",
-				first_windowing_err,
-				second_windowing_err,
-			)
-		}
-
-		// The player explicitly wanted the one in `first_windowing`, so we print a warning saying
-		// that it couldn't be loaded. 
-		if preference_given {
-			log.warn("KARL2D_LINUX_WINDOWING was specified, but Karl2D failed to load that windowing system. Error:", first_windowing_err)
-		}
-	}
-
-	win_state_alloc_error: runtime.Allocator_Error
-	s.win_state, win_state_alloc_error = mem.alloc(
-		s.win.state_size(),
-		allocator = allocator,
+	win_state_mem, win_state_mem_err := mem.alloc(
+		win_state_type.size,
+		win_state_type.align,
+		allocator,
 	)
 
-	log.assertf(win_state_alloc_error == nil,
+	log.assertf(win_state_mem_err == nil,
 		"Failed allocating memory for Linux windowing: %v",
-		win_state_alloc_error,
+		win_state_mem_err,
 	)
+
+	s.win_state = (^Linux_Window_State)(win_state_mem)
 
 	s.win.init(
 		s.win_state,
@@ -136,46 +89,122 @@ linux_init :: proc(
 		allocator,
 	)
 
-	linux_create_connected_gamepads()
+	linux_create_connected_gamepads(s)
 
 	// Set up monitoring for new gamepads. This uses udev. It looks for `input` devices being added.
 	// The monitor is polled in `linux_get_events`.
-	{
+	udev_missing, udev_ok := udev.load()
+
+	if udev_ok {
 		s.udev_ptr = udev.new()
 		s.udev_mon = udev.monitor_new_from_netlink(s.udev_ptr, "udev")
 		udev.monitor_filter_add_match_subsystem_devtype(s.udev_mon, "input", nil)
 		udev.monitor_enable_receiving(s.udev_mon)
+	} else {
+		log.errorf("No gamepad hotplugging. Could not load %v.", udev_missing)
 	}
 }
 
-linux_shutdown :: proc() {
-	for &g in s.gamepads {
-		linux_destroy_gamepad(&g)
+linux_choose_windowing :: proc(temp_allocator: runtime.Allocator) -> (
+	_win: Linux_Window_Interface,
+	_failure_reason: string,
+	_ok: bool,
+) {
+	// We pick windowing system by trying to to actually load it. This means trying to runetime-load
+	// the required shared libraries.
+	windowing_1 := LINUX_WINDOW_WAYLAND
+	windowing_2 := LINUX_WINDOW_X11
+
+	// The player can force Karl2D to try another windowing system first.
+	preference_given := false
+	windowing_preference := os.get_env("KARL2D_LINUX_WINDOWING", temp_allocator)
+
+	switch windowing_preference {
+	case "":
+
+	case "wayland":
+		preference_given = true
+
+	case "x11":
+		windowing_1 = LINUX_WINDOW_X11
+		windowing_2 = LINUX_WINDOW_WAYLAND
+		preference_given = true
+
+	case:
+		log.warnf(
+			"Ignoring KARL2D_LINUX_WINDOWING=%v. It has to be \"wayland\" or \"x11\".",
+			windowing_preference,
+		)
 	}
 
-	udev.monitor_unref(s.udev_mon)
-	udev.unref(s.udev_ptr)
+	windowing_1_err, windowing_1_available := windowing_1.is_available()
 
-	s.win.shutdown()
+	if !windowing_1_available {
+		windowing_2_err, windowing_2_available := windowing_2.is_available()
+
+		if !windowing_2_available {
+			// The reasons go in the panic itself rather than only in the log above it: a game
+			// that raises the log level past info would otherwise be told to read reasons that
+			// were never printed.
+			failure_reason := fmt.aprintf(
+				"Found neither Wayland nor X11. Karl2D needs one of them. %s %s",
+				windowing_1_err,
+				windowing_2_err,
+				allocator = temp_allocator,
+			)
+
+			return {}, failure_reason, false
+		}
+
+		// The player explicitly wanted the one in `windowing_1`, so we print a warning saying
+		// that it couldn't be loaded. 
+		if preference_given {
+			log.warn("KARL2D_LINUX_WINDOWING was specified, but Karl2D failed to load that windowing system. Error:", windowing_1_err)
+		}
+
+		return windowing_2, "", true
+	}
+
+	return windowing_1, "", true
+}
+
+linux_shutdown :: proc(s: ^Linux_State) {
+	for &g in s.gamepads {
+		linux_destroy_gamepad(s, &g)
+	}
+
+	if s.udev_mon != nil {
+		udev.monitor_unref(s.udev_mon)
+	}
+
+	if s.udev_ptr != nil {
+		udev.unref(s.udev_ptr)
+	}
+
+	s.win.shutdown(s.win_state)
 	a := s.allocator
 	free(s.win_state, a)
 }
 
-linux_get_window_render_glue :: proc() -> ^Window_Render_Glue {
-	return s.win.get_window_render_glue()
+linux_get_window_render_glue :: proc(s: ^Linux_State) -> ^Window_Render_Glue {
+	return s.win.get_window_render_glue(s.win_state)
 }
 
-linux_before_present :: proc() {
-	s.win.before_present()
+linux_before_present :: proc(s: ^Linux_State) {
+	s.win.before_present(s.win_state)
 }
 
-linux_get_events :: proc(events: ^[dynamic]Event) {
-	s.win.get_events(events)
-	linux_poll_for_new_gamepads()
-	linux_get_gamepad_events(events)
+linux_get_events :: proc(s: ^Linux_State, events: ^[dynamic]Event) {
+	s.win.get_events(s.win_state, events)
+	linux_poll_for_new_gamepads(s)
+	linux_get_gamepad_events(s, events)
 }
 
-linux_poll_for_new_gamepads :: proc() {
+linux_poll_for_new_gamepads :: proc(s: ^Linux_State) {
+	if s.udev_mon == nil {
+		return
+	}
+
 	pfd := posix.pollfd {
 		fd = posix.FD(udev.monitor_get_fd(s.udev_mon)),
 		events = {posix.Poll_Event_Bits.IN},
@@ -206,42 +235,42 @@ linux_poll_for_new_gamepads :: proc() {
 		}
 
 		if idx != -1 {
-			if gp, gp_ok := linux_create_gamepad(path); gp_ok {
+			if gp, gp_ok := linux_create_gamepad(s, path); gp_ok {
 				s.gamepads[idx] = gp
 			}
 		}
 	}
 }
 
-linux_get_screen_width :: proc() -> int {
-	return s.win.get_screen_width()
+linux_get_screen_width :: proc(s: ^Linux_State) -> int {
+	return s.win.get_screen_width(s.win_state)
 }
 
-linux_get_screen_height :: proc() -> int {
-	return s.win.get_screen_height()
+linux_get_screen_height :: proc(s: ^Linux_State) -> int {
+	return s.win.get_screen_height(s.win_state)
 }
 
-linux_set_window_title :: proc(title: string) {
-	s.win.set_title(title)
+linux_set_window_title :: proc(s: ^Linux_State, title: string) {
+	s.win.set_title(s.win_state, title)
 }
 
-linux_set_window_position :: proc(x: int, y: int) {
-	s.win.set_position(x, y)
+linux_set_window_position :: proc(s: ^Linux_State, x: int, y: int) {
+	s.win.set_position(s.win_state, x, y)
 }
 
-linux_get_window_position :: proc() -> Vec2 {
-	return s.win.get_position()
+linux_get_window_position :: proc(s: ^Linux_State) -> Vec2 {
+	return s.win.get_position(s.win_state)
 }
 
-set_screen_size :: proc(w, h: int) {
-	s.win.set_screen_size(w, h)
+linux_set_screen_size :: proc(s: ^Linux_State, w, h: int) {
+	s.win.set_screen_size(s.win_state, w, h)
 }
 
-linux_get_window_scale :: proc() -> f32 {
-	return s.win.get_window_scale()
+linux_get_window_scale :: proc(s: ^Linux_State) -> f32 {
+	return s.win.get_window_scale(s.win_state)
 }
 
-linux_create_connected_gamepads :: proc() {
+linux_create_connected_gamepads :: proc(s: ^Linux_State) {
 	// Gamepads are described by device files at path `/dev/input/eventXX`
 	devices_handle, devices_handle_ok := os.open("/dev/input") 
 
@@ -273,14 +302,14 @@ linux_create_connected_gamepads :: proc() {
 			break					
 		}
 
-		if gamepad, gamepad_ok := linux_create_gamepad(fi.fullpath); gamepad_ok {
+		if gamepad, gamepad_ok := linux_create_gamepad(s, fi.fullpath); gamepad_ok {
 			s.gamepads[gamepad_idx] = gamepad
 			gamepad_idx += 1
 		}
 	}
 }
 
-linux_create_gamepad :: proc(device_path: string) -> (Linux_Gamepad, bool) {
+linux_create_gamepad :: proc(s: ^Linux_State, device_path: string) -> (Linux_Gamepad, bool) {
 	fd, err := os.open(device_path, { .Read, .Write, .Non_Blocking })
 
 	if err != nil {
@@ -329,7 +358,7 @@ linux_create_gamepad :: proc(device_path: string) -> (Linux_Gamepad, bool) {
 				continue
 			}
 
-			axis := gamepad_axis_from_evdev_axis(i)
+			axis := linux_gamepad_axis_from_evdev_axis(i)
 
 			if axis != .None {
 				absinfo: evdev.input_absinfo
@@ -362,7 +391,7 @@ linux_create_gamepad :: proc(device_path: string) -> (Linux_Gamepad, bool) {
 	return gamepad, true
 }
 
-gamepad_axis_from_evdev_axis :: proc(evdev_axis: evdev.Axis) -> Gamepad_Axis {
+linux_gamepad_axis_from_evdev_axis :: proc(evdev_axis: evdev.Axis) -> Gamepad_Axis {
 	#partial switch evdev_axis {
 		case .X:  return .Left_Stick_X
 		case .Y:  return .Left_Stick_Y
@@ -375,13 +404,13 @@ gamepad_axis_from_evdev_axis :: proc(evdev_axis: evdev.Axis) -> Gamepad_Axis {
 	return .None
 }
 
-linux_destroy_gamepad :: proc(gamepad: ^Linux_Gamepad) {
+linux_destroy_gamepad :: proc(s: ^Linux_State, gamepad: ^Linux_Gamepad) {
 	os.close(gamepad.fd)
 	delete(gamepad.name, s.allocator)
 	gamepad.active = false
 }
 
-linux_is_gamepad_active :: proc(gamepad: int) -> bool {
+linux_is_gamepad_active :: proc(s: ^Linux_State, gamepad: int) -> bool {
 	if gamepad < 0 || gamepad > len(s.gamepads) - 1 || gamepad > MAX_GAMEPADS {
 		return false
 	}
@@ -389,62 +418,63 @@ linux_is_gamepad_active :: proc(gamepad: int) -> bool {
 	return s.gamepads[gamepad].active
 }
 
-microsoft_button_from_evdev_button :: proc(b: evdev.Button) -> Gamepad_Button {
-	#partial switch b {
-	case .DPAD_UP: return .Left_Face_Right
-	case .DPAD_DOWN: return .Left_Face_Down
-	case .DPAD_LEFT: return .Left_Face_Left
-	case .DPAD_RIGHT: return .Left_Face_Up
-
-	case .A: return .Right_Face_Down
-	case .B: return .Right_Face_Right
-	case .X: return .Right_Face_Left
-	case .Y: return .Right_Face_Up
-
-	case .TL: return .Left_Shoulder
-	case .TL2: return .Left_Trigger
-	case .TR: return .Right_Shoulder
-	case .TR2: return .Right_Trigger
-
-	case .SELECT: return .Middle_Face_Left
-	case .MODE: return .Middle_Face_Middle
-	case .START: return .Middle_Face_Right
-	case .THUMBL: return .Left_Stick_Press
-	case .THUMBR: return .Right_Stick_Press
-	}
-
-	return .None
-}
-
-sony_button_from_evdev_button :: proc(b: evdev.Button) -> Gamepad_Button {
-	#partial switch b {
-	case .DPAD_UP: return .Left_Face_Right
-	case .DPAD_DOWN: return .Left_Face_Down
-	case .DPAD_LEFT: return .Left_Face_Left
-	case .DPAD_RIGHT: return .Left_Face_Up
-
-	case .A: return .Right_Face_Down
-	case .B: return .Right_Face_Right
-	case .X: return .Right_Face_Up
-	case .Y: return .Right_Face_Left
-
-	case .TL: return .Left_Shoulder
-	case .TL2: return .Left_Trigger
-	case .TR: return .Right_Shoulder
-	case .TR2: return .Right_Trigger
-
-	case .SELECT: return .Middle_Face_Left
-	case .MODE: return .Middle_Face_Middle
-	case .START: return .Middle_Face_Right
-	case .THUMBL: return .Left_Stick_Press
-	case .THUMBR: return .Right_Stick_Press
-	}
-
-	return .None
-}
-
-linux_get_gamepad_events :: proc(events: ^[dynamic]Event) {
+linux_get_gamepad_events :: proc(s: ^Linux_State, events: ^[dynamic]Event) {
 	event: evdev.input_event
+
+	microsoft_button_from_evdev_button :: proc(b: evdev.Button) -> Gamepad_Button {
+		#partial switch b {
+		case .DPAD_UP: return .Left_Face_Right
+		case .DPAD_DOWN: return .Left_Face_Down
+		case .DPAD_LEFT: return .Left_Face_Left
+		case .DPAD_RIGHT: return .Left_Face_Up
+
+		case .A: return .Right_Face_Down
+		case .B: return .Right_Face_Right
+		case .X: return .Right_Face_Left
+		case .Y: return .Right_Face_Up
+
+		case .TL: return .Left_Shoulder
+		case .TL2: return .Left_Trigger
+		case .TR: return .Right_Shoulder
+		case .TR2: return .Right_Trigger
+
+		case .SELECT: return .Middle_Face_Left
+		case .MODE: return .Middle_Face_Middle
+		case .START: return .Middle_Face_Right
+		case .THUMBL: return .Left_Stick_Press
+		case .THUMBR: return .Right_Stick_Press
+		}
+
+		return .None
+	}
+
+	sony_button_from_evdev_button :: proc(b: evdev.Button) -> Gamepad_Button {
+		#partial switch b {
+		case .DPAD_UP: return .Left_Face_Right
+		case .DPAD_DOWN: return .Left_Face_Down
+		case .DPAD_LEFT: return .Left_Face_Left
+		case .DPAD_RIGHT: return .Left_Face_Up
+
+		case .A: return .Right_Face_Down
+		case .B: return .Right_Face_Right
+		case .X: return .Right_Face_Up
+		case .Y: return .Right_Face_Left
+
+		case .TL: return .Left_Shoulder
+		case .TL2: return .Left_Trigger
+		case .TR: return .Right_Shoulder
+		case .TR2: return .Right_Trigger
+
+		case .SELECT: return .Middle_Face_Left
+		case .MODE: return .Middle_Face_Middle
+		case .START: return .Middle_Face_Right
+		case .THUMBL: return .Left_Stick_Press
+		case .THUMBR: return .Right_Stick_Press
+		}
+
+		return .None
+	}
+
 
 	for &gp, idx in s.gamepads {
 		if !gp.active {
@@ -456,7 +486,7 @@ linux_get_gamepad_events :: proc(events: ^[dynamic]Event) {
 
 			if event_read_err != nil && event_read_err != .EAGAIN {
 				log.debugf("Gamepad %v disconnected", idx)
-				linux_destroy_gamepad(&gp)
+				linux_destroy_gamepad(s, &gp)
 				break
 			}
 
@@ -499,7 +529,7 @@ linux_get_gamepad_events :: proc(events: ^[dynamic]Event) {
 
 				if evdev_axis == .Z || evdev_axis == .RZ {
 					// ^ triggers, goes between 0 an 1
-					axis := gamepad_axis_from_evdev_axis(evdev_axis)
+					axis := linux_gamepad_axis_from_evdev_axis(evdev_axis)
 					value := f32(event.value) / f32(gp.axes[axis].event_max)
 
 					// MS gamepads don't have trigger button event, so we fake it
@@ -559,7 +589,7 @@ linux_get_gamepad_events :: proc(events: ^[dynamic]Event) {
 					// -1 and 1. These often have a big min and max value. This code normalizes
 					// that integer value range into a float range of -1 to 1.
 
-					axis := gamepad_axis_from_evdev_axis(evdev_axis)
+					axis := linux_gamepad_axis_from_evdev_axis(evdev_axis)
 
 					if axis != .None {
 						min := f32(gp.axes[axis].event_min)
@@ -573,7 +603,7 @@ linux_get_gamepad_events :: proc(events: ^[dynamic]Event) {
 	}
 }
 
-linux_get_gamepad_axis :: proc(gamepad: Gamepad_Index, axis: Gamepad_Axis) -> f32 {
+linux_get_gamepad_axis :: proc(s: ^Linux_State, gamepad: Gamepad_Index, axis: Gamepad_Axis) -> f32 {
 	if axis < min(Gamepad_Axis) || axis > max(Gamepad_Axis) {
 		return 0
 	}
@@ -585,7 +615,12 @@ linux_get_gamepad_axis :: proc(gamepad: Gamepad_Index, axis: Gamepad_Axis) -> f3
 	return s.gamepads[gamepad].axes[axis].value
 }
 
-linux_set_gamepad_vibration :: proc(gamepad: Gamepad_Index, left: f32, right: f32) {
+linux_set_gamepad_vibration :: proc(
+	s: ^Linux_State,
+	gamepad: Gamepad_Index,
+	left: f32,
+	right: f32,
+) {
 	if gamepad < 0 || gamepad >= MAX_GAMEPADS {
 		return
 	}
@@ -631,7 +666,7 @@ linux_set_gamepad_vibration :: proc(gamepad: Gamepad_Index, left: f32, right: f3
 	os.write(gp.fd, mem.any_to_bytes(syn_event))
 }
 
-linux_open_url :: proc(url: string) -> bool {
+linux_open_url :: proc(s: ^Linux_State, url: string) -> bool {
 	process, process_err := os.process_start(
 		{
 			command = {
@@ -655,42 +690,86 @@ linux_open_url :: proc(url: string) -> bool {
 	return process_state.exit_code == 0
 }
 
-linux_set_internal_state :: proc(state: rawptr) {
-	assert(state != nil)
-	s = (^Linux_State)(state)
-	s.win.set_internal_state(s.win_state)
+linux_get_window_mode :: proc(s: ^Linux_State) -> Window_Mode {
+	return s.win.get_window_mode(s.win_state)
 }
 
-linux_set_window_mode :: proc(window_mode: Window_Mode) {
-	s.win.set_window_mode(window_mode)
+linux_set_window_mode :: proc(s: ^Linux_State, window_mode: Window_Mode) {
+	s.win.set_window_mode(s.win_state, window_mode)
 }
 
-linux_set_window_icon :: proc(image: Image) -> bool {
-	return s.win.set_window_icon(image)
+linux_set_window_icon :: proc(s: ^Linux_State, image: Image) -> bool {
+	return s.win.set_window_icon(s.win_state, image)
 }
 
-linux_set_cursor_hidden :: proc(hidden: bool) {
-	s.win.set_cursor_hidden(hidden)
+linux_get_monitors :: proc(s: ^Linux_State, allocator: runtime.Allocator) -> []Monitor_Info {
+	if s != nil {
+		return s.win.get_monitors(s.win_state, allocator)
+	}
+
+	// get_monitors is OK to call with `nil` state, because it can be used before `k2.init` has been
+	// called. Threfore we need to pick the windowing solution here. This is slow (5-9 ms), but no
+	// frames have started pumping yet so it should be OK.
+
+	@(static) pre_init_win: Linux_Window_Interface
+	@(static) pre_init_win_chosen: bool
+
+	if !pre_init_win_chosen {
+		temp_arena: runtime.Arena
+		temp_allocator := runtime.arena_allocator(&temp_arena)
+		win, win_failure_reason, win_ok := linux_choose_windowing(temp_allocator)
+
+		if !win_ok {
+			log.error(win_failure_reason)
+			runtime.arena_destroy(&temp_arena)
+			return nil
+		}
+
+		runtime.arena_destroy(&temp_arena)
+		pre_init_win = win
+		pre_init_win_chosen = true
+	}
+
+	return pre_init_win.get_monitors(nil, allocator)
 }
 
-linux_is_cursor_hidden :: proc() -> bool {
-	return s.win.is_cursor_hidden()
+linux_get_window_monitor :: proc(s: ^Linux_State) -> Monitor_Id {
+	return s.win.get_window_monitor(s.win_state)
 }
 
-linux_set_mouse_locked :: proc(locked: bool) {
-	s.win.set_mouse_locked(locked)
+linux_set_window_monitor :: proc(s: ^Linux_State, monitor: Monitor_Id) {
+	s.win.set_window_monitor(s.win_state, monitor)
 }
 
-linux_is_mouse_locked :: proc() -> bool {
-	return s.win.is_mouse_locked()
+linux_set_cursor_hidden :: proc(s: ^Linux_State, hidden: bool) {
+	s.win.set_cursor_hidden(s.win_state, hidden)
 }
 
-linux_create_custom_cursor :: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool) {
-	return s.win.create_custom_cursor(image, hotspot)
+linux_is_cursor_hidden :: proc(s: ^Linux_State) -> bool {
+	return s.win.is_cursor_hidden(s.win_state)
 }
 
-linux_set_cursor :: proc(cursor: Cursor) {
-	s.win.set_cursor(cursor)
+linux_set_mouse_locked :: proc(s: ^Linux_State, locked: bool) {
+	s.win.set_mouse_locked(s.win_state, locked)
+}
+
+linux_is_mouse_locked :: proc(s: ^Linux_State) -> bool {
+	return s.win.is_mouse_locked(s.win_state)
+}
+
+linux_create_custom_cursor :: proc(
+	s: ^Linux_State,
+	image: Image,
+	hotspot: [2]int,
+) -> (
+	Custom_Cursor,
+	bool,
+) {
+	return s.win.create_custom_cursor(s.win_state, image, hotspot)
+}
+
+linux_set_cursor :: proc(s: ^Linux_State, cursor: Cursor) {
+	s.win.set_cursor(s.win_state, cursor)
 }
 
 // Cursor theme names for a standard cursor. Both X11 and Wayland load cursors out of the user's
@@ -699,7 +778,6 @@ linux_set_cursor :: proc(cursor: Cursor) {
 // `name` is the freedesktop name, which is what current themes ship. `fallback` is the older X11
 // name for the same cursor: plenty of themes still only have those, and some have both. Neither is
 // guaranteed to exist, so callers have to handle a theme that has no cursor for it at all.
-@(private="package")
 linux_standard_cursor_names :: proc(cursor: Standard_Cursor) -> (name: cstring, fallback: cstring) {
 	switch cursor {
 	case .Default:     return "default", "left_ptr"
@@ -719,66 +797,19 @@ linux_standard_cursor_names :: proc(cursor: Standard_Cursor) -> (name: cstring, 
 	return "default", "left_ptr"
 }
 
-linux_destroy_custom_cursor :: proc(custom_cursor: Custom_Cursor) {
-	s.win.destroy_custom_cursor(custom_cursor)
+linux_destroy_custom_cursor :: proc(s: ^Linux_State, custom_cursor: Custom_Cursor) {
+	s.win.destroy_custom_cursor(s.win_state, custom_cursor)
 }
 
 Linux_State :: struct {
+	using _: Platform_State,
 	win: Linux_Window_Interface,
-	win_state: rawptr,
+	win_state: ^Linux_Window_State,
 	allocator: runtime.Allocator,
 
 	gamepads: [MAX_GAMEPADS]Linux_Gamepad,
 	udev_ptr: ^udev.udev,
 	udev_mon: ^udev.monitor,
-}
-
-@(private="package")
-Linux_Window_Interface :: struct #all_or_none {
-	state_size: proc() -> int,
-
-	// Reports whether this windowing system can be used, by loading its shared libraries and
-	// connecting to its server. The connection is thrown away again. But the libraries stay loaded
-	// so that `init` can use them.
-	try_load: proc(
-		failure_reason_allocator: runtime.Allocator,
-	) -> (
-		failure_reason: string,
-		ok: bool,
-	),
-
-	init: proc(
-		window_state: rawptr,
-		screen_width: int,
-		screen_height: int,
-		window_title: string,
-		init_options: Init_Options,
-		allocator: runtime.Allocator,
-	),
-
-	shutdown: proc(),
-	get_window_render_glue: proc() -> ^Window_Render_Glue,
-	get_events: proc(events: ^[dynamic]Event),
-	before_present: proc(),
-	set_title: proc(title: string),
-	set_position: proc(x: int, y: int),
-	get_position: proc() -> Vec2,
-	set_screen_size: proc(w, h: int),
-	get_screen_width: proc() -> int,
-	get_screen_height: proc() -> int,
-	get_window_scale: proc() -> f32,
-	set_window_mode: proc(window_mode: Window_Mode),
-	set_window_icon: proc(image: Image) -> bool,
-	set_cursor_hidden: proc(hidden: bool),
-	is_cursor_hidden: proc() -> bool,
-	set_mouse_locked: proc(locked: bool),
-	is_mouse_locked: proc() -> bool,
-
-	create_custom_cursor: proc(image: Image, hotspot: [2]int) -> (Custom_Cursor, bool),
-	set_cursor: proc(cursor: Cursor),
-	destroy_custom_cursor: proc(custom_cursor: Custom_Cursor),
-
-	set_internal_state: proc(state: rawptr),
 }
 
 Linux_Gamepad_Axis_Info :: struct {
@@ -813,17 +844,15 @@ Linux_Gamepad :: struct {
 	rumble_effect_id: u32,
 }
 
-@(private="package")
-key_from_xkeycode :: proc(kc: u32) -> Keyboard_Key {
+linux_xkeycode_to_k2key :: proc(kc: u32) -> Keyboard_Key {
 	if kc >= 255 {
 		return .None
 	}
 
-	return KEY_FROM_XKEYCODE[u8(kc)]
+	return LINUX_KEY_FROM_XKEYCODE[u8(kc)]
 }
 
-@(private="package")
-KEY_FROM_XKEYCODE := [255]Keyboard_Key {
+LINUX_KEY_FROM_XKEYCODE := [255]Keyboard_Key {
 	8 = .Space,
 	9 = .Escape,
 	10 = .N1,

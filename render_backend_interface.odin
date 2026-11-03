@@ -5,6 +5,7 @@ import "base:runtime"
 Shader_Constant_Desc :: struct {
 	name: string,
 	size: int,
+	default_value: []u8,
 }
 
 Shader_Texture_Bindpoint_Desc :: struct {
@@ -32,6 +33,11 @@ Draw_Call_Change :: enum {
 // render backend.
 DRAW_CALL_CHANGE_ALL :: ~bit_set[Draw_Call_Change]{}
 
+Draw_Call_Texture :: struct {
+	handle: Render_Backend_Texture,
+	sampler: Texture_Sampler,
+}
+
 // A chunk of drawing work that shares enough state to be able to draw together. Points out the
 // range in the vertex buffer that the draw call will use.
 //
@@ -52,7 +58,7 @@ Draw_Call :: struct {
 	// A clone of the constants data of the shader, snapshotted at the time when the draw call was
 	// created. Additionally, things like the Karl2D view-project-matrix will be filled in here.
 	constants_data: []u8,
-	textures: []Texture_Handle,
+	textures: []Draw_Call_Texture,
 
 	render_target: Render_Target_Handle,
 	scissor: Maybe(Rect),
@@ -66,11 +72,13 @@ Draw_Call :: struct {
 	changed: bit_set[Draw_Call_Change],
 }
 
+Render_Backend_State :: struct {}
+
 Render_Backend_Interface :: struct #all_or_none {
-	state_size: proc() -> int,
+	state_type: typeid,
 	
 	init: proc(
-		state: rawptr,
+		s: ^Render_Backend_State,
 		glue: ^Window_Render_Glue,
 		swapchain_width: int,
 		swapchain_height: int,
@@ -78,45 +86,60 @@ Render_Backend_Interface :: struct #all_or_none {
 		allocator: runtime.Allocator,
 	),
 
-	shutdown: proc(),
-	clear: proc(render_target: Render_Target_Handle, color: Color),
-	present: proc(),
+	shutdown: proc(s: ^Render_Backend_State),
+	clear: proc(s: ^Render_Backend_State, render_target: Render_Target_Handle, color: Color),
+	present: proc(s: ^Render_Backend_State),
+	set_vsync: proc(s: ^Render_Backend_State, enabled: bool),
 	
-	draw: proc(vertex_buffer: []u8, draw_calls: []Draw_Call),
+	draw: proc(s: ^Render_Backend_State, vertex_buffer: []u8, draw_calls: []Draw_Call),
 
-	set_internal_state: proc(state: rawptr),
+	create_texture: proc(
+		s: ^Render_Backend_State,
+		width: int,
+		height: int,
+		format: Pixel_Format,
+	) -> (
+		Render_Backend_Texture,
+		bool,
+	),
 
-	create_texture: proc(width: int, height: int, format: Pixel_Format) -> (Texture_Handle, bool),
 	load_texture: proc(
+		s: ^Render_Backend_State,
 		data: []u8,
 		width: int,
 		height: int,
 		format: Pixel_Format,
-	) -> (Texture_Handle, bool),
+	) -> (Render_Backend_Texture, bool),
+
 	load_texture_compressed: proc(
+		s: ^Render_Backend_State,
 		data: []u8,
 		width: int,
 		height: int,
 		format: Compressed_Texture_Format,
-	) -> (Texture_Handle, bool),
-	update_texture: proc(handle: Texture_Handle, data: []u8, rect: Rect, pitch: int) -> bool,
-	destroy_texture: proc(handle: Texture_Handle),
-	texture_needs_vertical_flip: proc(handle: Texture_Handle) -> bool,
+	) -> (Render_Backend_Texture, bool),
+
+	update_texture: proc(
+		s: ^Render_Backend_State,
+		handle: Render_Backend_Texture,
+		data: []u8,
+		rect: Rect,
+		pitch: int,
+	) -> bool,
+
+	destroy_texture: proc(s: ^Render_Backend_State, handle: Render_Backend_Texture),
+	flip_render_textures: bool,
 
 	create_render_texture: proc(
+		s: ^Render_Backend_State,
 		width: int,
 		height: int,
-	) -> (Texture_Handle, Render_Target_Handle, bool),
-	destroy_render_target: proc(render_texture: Render_Target_Handle),
+	) -> (Render_Backend_Texture, Render_Target_Handle, bool),
 	
-	set_texture_filter: proc(
-		handle: Texture_Handle,
-		scale_down_filter: Texture_Filter,
-		scale_up_filter: Texture_Filter,
-		mip_filter: Texture_Filter,
-	),
-
+	destroy_render_target: proc(s: ^Render_Backend_State, render_texture: Render_Target_Handle),
+	
 	load_shader: proc(
+		s: ^Render_Backend_State,
 		vertex_shader_data: []byte,
 		pixel_shader_data: []byte,
 		desc_allocator: runtime.Allocator,
@@ -127,11 +150,11 @@ Render_Backend_Interface :: struct #all_or_none {
 		ok: bool,
 	),
 
-	destroy_shader: proc(shader: Shader_Handle),
+	destroy_shader: proc(s: ^Render_Backend_State, shader: Shader_Handle),
 
-	resize_swapchain: proc(width, height: int),
-	get_swapchain_width: proc() -> int,
-	get_swapchain_height: proc() -> int,
+	resize_swapchain: proc(s: ^Render_Backend_State, width, height: int),
+	get_swapchain_width: proc(s: ^Render_Backend_State) -> int,
+	get_swapchain_height: proc(s: ^Render_Backend_State) -> int,
 
 	default_shader_vertex_source: proc() -> []byte,
 	default_shader_fragment_source: proc() -> []byte,

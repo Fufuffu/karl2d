@@ -1,36 +1,7 @@
 #+build windows
 #+vet explicit-allocators
-#+private file
-
+#+private package
 package karl2d
-
-@(private="package")
-RENDER_BACKEND_D3D11 :: Render_Backend_Interface {
-	state_size = d3d11_state_size,
-	init = d3d11_init,
-	shutdown = d3d11_shutdown,
-	clear = d3d11_clear,
-	present = d3d11_present,
-	draw = d3d11_draw,
-	resize_swapchain = d3d11_resize_swapchain,
-	get_swapchain_width = d3d11_get_swapchain_width,
-	get_swapchain_height = d3d11_get_swapchain_height,
-	set_internal_state = d3d11_set_internal_state,
-	create_texture = d3d11_create_texture,
-	load_texture = d3d11_load_texture,
-	load_texture_compressed = d3d11_load_texture_compressed,
-	update_texture = d3d11_update_texture,
-	destroy_texture = d3d11_destroy_texture,
-	texture_needs_vertical_flip = d3d11_texture_needs_vertical_flip,
-	create_render_texture = d3d11_create_render_texture,
-	destroy_render_target = d3d11_destroy_render_target,
-	set_texture_filter = d3d11_set_texture_filter,
-	load_shader = d3d11_load_shader,
-	destroy_shader = d3d11_destroy_shader,
-	default_shader_vertex_source = d3d11_default_shader_vertex_source,
-	default_shader_fragment_source = d3d11_default_shader_fragment_source,
-	get_depth_clip_range = d3d11_get_depth_clip_range,
-}
 
 import d3d11 "vendor:directx/d3d11"
 import dxgi "vendor:directx/dxgi"
@@ -42,24 +13,46 @@ import "core:mem"
 import hm "core:container/handle_map"
 import "base:runtime"
 
-d3d11_state_size :: proc() -> int {
-	return size_of(D3D11_State)
+RENDER_BACKEND_D3D11 :: Render_Backend_Interface {
+	state_type = D3D11_State,
+	init = d3d11_init,
+	shutdown = d3d11_shutdown,
+	clear = d3d11_clear,
+	present = d3d11_present,
+	set_vsync = d3d11_set_vsync,
+	draw = d3d11_draw,
+	resize_swapchain = d3d11_resize_swapchain,
+	get_swapchain_width = d3d11_get_swapchain_width,
+	get_swapchain_height = d3d11_get_swapchain_height,
+	create_texture = d3d11_create_texture,
+	load_texture = d3d11_load_texture,
+	load_texture_compressed = d3d11_load_texture_compressed,
+	update_texture = d3d11_update_texture,
+	destroy_texture = d3d11_destroy_texture,
+	flip_render_textures = false,
+	create_render_texture = d3d11_create_render_texture,
+	destroy_render_target = d3d11_destroy_render_target,
+	load_shader = d3d11_load_shader,
+	destroy_shader = d3d11_destroy_shader,
+	default_shader_vertex_source = d3d11_default_shader_vertex_source,
+	default_shader_fragment_source = d3d11_default_shader_fragment_source,
+	get_depth_clip_range = d3d11_get_depth_clip_range,
 }
 
 d3d11_init :: proc(
-	state: rawptr,
+	s: ^D3D11_State,
 	glue: ^Window_Render_Glue,
 	swapchain_width: int,
 	swapchain_height: int,
 	options: Init_Options,
 	allocator := context.allocator,
 ) {
-	s = (^D3D11_State)(state)
 	s.allocator = allocator
 
 	hm.dynamic_init(&s.shaders, allocator)
 	hm.dynamic_init(&s.textures, allocator)
 	hm.dynamic_init(&s.render_targets, allocator)
+	s.texture_samplers = make(map[Texture_Sampler]^d3d11.ISamplerState, allocator)
 
 	/*
 	This comes from
@@ -84,52 +77,85 @@ d3d11_init :: proc(
 		.BGRA_SUPPORT,
 	}
 
+	err: d3d11.HRESULT
+
 	when ODIN_DEBUG {
 		device_flags := base_device_flags + { .DEBUG }
 	
-		device_err := ch(d3d11.CreateDevice(
+		err = d3d11.CreateDevice(
 			nil,
 			.HARDWARE,
 			nil,
 			device_flags,
-			&feature_levels[0], len(feature_levels),
-			d3d11.SDK_VERSION, &base_device, nil, &base_device_context))
+			&feature_levels[0],
+			len(feature_levels),
+			d3d11.SDK_VERSION,
+			&base_device,
+			nil,
+			&base_device_context,
+		)
 
-		if u32(device_err) == 0x887a002d {
+		d3d11_check(s, err)
+
+		if u32(err) == 0x887a002d {
 			log.error("You're running in debug mode. So we are trying to create a debug D3D11 device. But you don't have DirectX SDK installed, so we can't enable debug layers. Creating a device without debug layers (you'll get no good D3D11 errors).")
 
-			ch(d3d11.CreateDevice(
+			err = d3d11.CreateDevice(
 				nil,
 				.HARDWARE,
 				nil,
 				base_device_flags,
-				&feature_levels[0], len(feature_levels),
-				d3d11.SDK_VERSION, &base_device, nil, &base_device_context))
+				&feature_levels[0],
+				len(feature_levels),
+				d3d11.SDK_VERSION,
+				&base_device,
+				nil,
+				&base_device_context,
+			)
+
+			d3d11_check(s, err)
 		} else {
-			ch(base_device->QueryInterface(d3d11.IInfoQueue_UUID, (^rawptr)(&s.info_queue)))
+			err = base_device->QueryInterface(d3d11.IInfoQueue_UUID, (^rawptr)(&s.info_queue))
+			d3d11_check(s, err)
 		}
 	} else {
-		ch(d3d11.CreateDevice(
+		err = d3d11.CreateDevice(
 			nil,
 			.HARDWARE,
 			nil,
 			base_device_flags,
-			&feature_levels[0], len(feature_levels),
-			d3d11.SDK_VERSION, &base_device, nil, &base_device_context))
+			&feature_levels[0],
+			len(feature_levels),
+			d3d11.SDK_VERSION,
+			&base_device,
+			nil,
+			&base_device_context,
+		)
+
+		d3d11_check(s, err)
 	}
 	
-	ch(base_device->QueryInterface(d3d11.IDevice_UUID, (^rawptr)(&s.device)))
-	ch(base_device_context->QueryInterface(d3d11.IDeviceContext_UUID, (^rawptr)(&s.device_context)))
+	err = base_device->QueryInterface(d3d11.IDevice_UUID, (^rawptr)(&s.device))
+	d3d11_check(s, err)
+	err = base_device_context->QueryInterface(
+		d3d11.IDeviceContext_UUID,
+		(^rawptr)(&s.device_context),
+	)
+
+	d3d11_check(s, err)
 	dxgi_device: ^dxgi.IDevice
-	ch(s.device->QueryInterface(dxgi.IDevice_UUID, (^rawptr)(&dxgi_device)))
+	err = s.device->QueryInterface(dxgi.IDevice_UUID, (^rawptr)(&dxgi_device))
+	d3d11_check(s, err)
 	base_device->Release()
 	base_device_context->Release()
 	
-	ch(dxgi_device->GetAdapter(&s.dxgi_adapter))
+	err = dxgi_device->GetAdapter(&s.dxgi_adapter)
+	d3d11_check(s, err)
 	s.anti_alias = options.anti_alias
+	s.vsync = !options.disable_vsync
 	s.depth_test = options.depth_test
 
-	create_swapchain(swapchain_width, swapchain_height)
+	d3d11_create_swapchain(s, swapchain_width, swapchain_height)
 
 	rasterizer_desc := d3d11.RASTERIZER_DESC{
 		FillMode = .SOLID,
@@ -138,7 +164,8 @@ d3d11_init :: proc(
 		MultisampleEnable = d3d11.BOOL(options.anti_alias),
 	}
 
-	ch(s.device->CreateRasterizerState(&rasterizer_desc, &s.rasterizer_state))
+	err = s.device->CreateRasterizerState(&rasterizer_desc, &s.rasterizer_state)
+	d3d11_check(s, err)
 
 	if s.depth_test {
 		// Higher z ends up in front. GREATER_EQUAL instead of GREATER so that things drawn at the
@@ -148,7 +175,8 @@ d3d11_init :: proc(
 			DepthWriteMask = .ALL,
 			DepthFunc      = .GREATER_EQUAL,
 		}
-		ch(s.device->CreateDepthStencilState(&depth_stencil_desc, &s.depth_stencil_state))
+		err = s.device->CreateDepthStencilState(&depth_stencil_desc, &s.depth_stencil_state)
+		d3d11_check(s, err)
 	}
 
 	vertex_buffer_desc := d3d11.BUFFER_DESC{
@@ -157,7 +185,8 @@ d3d11_init :: proc(
 		BindFlags = {.VERTEX_BUFFER},
 		CPUAccessFlags = {.WRITE},
 	}
-	ch(s.device->CreateBuffer(&vertex_buffer_desc, nil, &s.vertex_buffer_gpu))
+	err = s.device->CreateBuffer(&vertex_buffer_desc, nil, &s.vertex_buffer_gpu)
+	d3d11_check(s, err)
 	
 	blend_alpha_desc := d3d11.BLEND_DESC {
 		RenderTarget = {
@@ -174,7 +203,8 @@ d3d11_init :: proc(
 		},
 	}
 
-	ch(s.device->CreateBlendState(&blend_alpha_desc, &s.blend_state_alpha))
+	err = s.device->CreateBlendState(&blend_alpha_desc, &s.blend_state_alpha)
+	d3d11_check(s, err)
 
 	blend_premultiplied_alpha_desc := d3d11.BLEND_DESC {
 		RenderTarget = {
@@ -191,7 +221,12 @@ d3d11_init :: proc(
 		},
 	}
 
-	ch(s.device->CreateBlendState(&blend_premultiplied_alpha_desc, &s.blend_state_premultiplied_alpha))
+	err = s.device->CreateBlendState(
+		&blend_premultiplied_alpha_desc,
+		&s.blend_state_premultiplied_alpha,
+	)
+
+	d3d11_check(s, err)
 
 	blend_additive_desc := d3d11.BLEND_DESC {
 		RenderTarget = {
@@ -208,10 +243,11 @@ d3d11_init :: proc(
 		},
 	}
 
-	ch(s.device->CreateBlendState(&blend_additive_desc, &s.blend_state_additive))
+	err = s.device->CreateBlendState(&blend_additive_desc, &s.blend_state_additive)
+	d3d11_check(s, err)
 }
 
-d3d11_shutdown :: proc() {
+d3d11_shutdown :: proc(s: ^D3D11_State) {
 	s.framebuffer_view->Release()
 	s.framebuffer->Release()
 	s.device_context->Release()
@@ -223,6 +259,14 @@ d3d11_shutdown :: proc() {
 	s.blend_state_additive->Release()
 	s.dxgi_adapter->Release()
 
+	for _, smp in s.texture_samplers {
+		if smp != nil {
+			smp->Release()
+		}
+	}
+
+	delete(s.texture_samplers)
+
 	if s.depth_test {
 		s.depth_buffer->Release()
 		s.depth_buffer_view->Release()
@@ -230,7 +274,7 @@ d3d11_shutdown :: proc() {
 	}
 
 	when ODIN_DEBUG {
-		d3d11_debug_print_live_objects()
+		d3d11_debug_print_live_objects(s)
 		s.device->Release()
 
 		if s.info_queue != nil {
@@ -246,10 +290,17 @@ d3d11_shutdown :: proc() {
 }
 
 // For finding D3D11 resource leaks etc
-d3d11_debug_print_live_objects :: proc() {
+d3d11_debug_print_live_objects :: proc(s: ^D3D11_State) {
 	debug: ^d3d11.IDebug
 
-	if s.info_queue != nil && ch(s.device->QueryInterface(d3d11.IDebug_UUID, (^rawptr)(&debug))) >= 0 {
+	if s.info_queue == nil {
+		return
+	}
+
+	err := s.device->QueryInterface(d3d11.IDebug_UUID, (^rawptr)(&debug))
+	d3d11_check(s, err)
+
+	if err >= 0 {
 		live_objs_res := debug->ReportLiveDeviceObjects({.DETAIL, .IGNORE_INTERNAL})
 
 		if live_objs_res >= 0 {
@@ -301,7 +352,7 @@ d3d11_debug_print_live_objects :: proc() {
 	}
 }
 
-d3d11_clear :: proc(render_target: Render_Target_Handle, color: Color) {
+d3d11_clear :: proc(s: ^D3D11_State, render_target: Render_Target_Handle, color: Color) {
 	c := f32_color_from_color(color)
 
 	if rt := hm.get(&s.render_targets, render_target); rt != nil {
@@ -319,11 +370,16 @@ d3d11_clear :: proc(render_target: Render_Target_Handle, color: Color) {
 	}
 }
 
-d3d11_present :: proc() {
-	ch(s.swapchain->Present(1, {}))
+d3d11_present :: proc(s: ^D3D11_State) {
+	err := s.swapchain->Present(s.vsync ? 1 : 0, {})
+	d3d11_check(s, err)
 }
 
-d3d11_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
+d3d11_set_vsync :: proc(s: ^D3D11_State, enabled: bool) {
+	s.vsync = enabled
+}
+
+d3d11_draw :: proc(s: ^D3D11_State, vertex_buffer: []u8, draw_calls: []Draw_Call) {
 	if len(vertex_buffer) == 0 || len(draw_calls) == 0 {
 		return
 	}
@@ -332,7 +388,8 @@ d3d11_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
 
 	// All the draw calls read from this one buffer. It only needs uploading once.
 	vb_data: d3d11.MAPPED_SUBRESOURCE
-	ch(dc->Map(s.vertex_buffer_gpu, 0, .WRITE_DISCARD, {}, &vb_data))
+	err := dc->Map(s.vertex_buffer_gpu, 0, .WRITE_DISCARD, {}, &vb_data)
+	d3d11_check(s, err)
 	{
 		gpu_map := slice.from_ptr((^u8)(vb_data.pData), VERTEX_BUFFER_MAX)
 		copy(gpu_map, vertex_buffer)
@@ -381,7 +438,7 @@ d3d11_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
 		}
 
 		if .Constants in changed {
-			d3d11_set_constants(call.constants, call.constants_data, d3d_shd^)
+			d3d11_set_constants(s, call.constants, call.constants_data, d3d_shd^)
 		}
 
 		if .Textures in changed {
@@ -389,9 +446,10 @@ d3d11_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
 				for t, t_idx in call.textures {
 					d3d_t := d3d_shd.texture_bindings[t_idx]
 
-					if t := hm.get(&s.textures, t); t != nil {
-						dc->PSSetShaderResources(d3d_t.bind_point, 1, &t.view)
-						dc->PSSetSamplers(d3d_t.sampler_bind_point, 1, &t.sampler)
+					if tex := hm.get(&s.textures, t.handle); tex != nil {
+						smp := d3d11_get_texture_sampler(s, t.sampler)
+						dc->PSSetShaderResources(d3d_t.bind_point, 1, &tex.view)
+						dc->PSSetSamplers(d3d_t.sampler_bind_point, 1, &smp)
 					}
 				}
 			}
@@ -467,10 +525,11 @@ d3d11_draw :: proc(vertex_buffer: []u8, draw_calls: []Draw_Call) {
 	}
 
 	dc->OMSetRenderTargets(0, nil, nil)
-	log_messages()
+	d3d11_log_messages(s)
 }
 
 d3d11_set_constants :: proc(
+	s: ^D3D11_State,
 	constants: []Shader_Constant_Location,
 	constants_data: []u8,
 	d3d_shd: D3D11_Shader,
@@ -495,7 +554,8 @@ d3d11_set_constants :: proc(
 			// There can be multiple constants within a single constant buffer. So mapping and
 			// unmapping for each one is slow.
 			map_data: d3d11.MAPPED_SUBRESOURCE
-			ch(dc->Map(gpu_data, 0, .WRITE_DISCARD, {}, &map_data))
+			err := dc->Map(gpu_data, 0, .WRITE_DISCARD, {}, &map_data)
+			d3d11_check(s, err)
 			maps[gpu_loc.buffer_idx] = map_data.pData
 		}
 
@@ -521,7 +581,7 @@ d3d11_set_constants :: proc(
 	}
 }
 
-d3d11_resize_swapchain :: proc(w, h: int) {
+d3d11_resize_swapchain :: proc(s: ^D3D11_State, w, h: int) {
 	s.framebuffer->Release()
 	s.framebuffer_view->Release()
 	s.swapchain->Release()
@@ -534,28 +594,25 @@ d3d11_resize_swapchain :: proc(w, h: int) {
 	s.width = w
 	s.height = h
 
-	create_swapchain(w, h)
+	d3d11_create_swapchain(s, w, h)
 }
 
-d3d11_get_swapchain_width :: proc() -> int {
+d3d11_get_swapchain_width :: proc(s: ^D3D11_State) -> int {
 	return s.width
 }
 
-d3d11_get_swapchain_height :: proc() -> int {
+d3d11_get_swapchain_height :: proc(s: ^D3D11_State) -> int {
 	return s.height
 }
 
-d3d11_set_internal_state :: proc(state: rawptr) {
-	s = (^D3D11_State)(state)
-}
-
-create_texture :: proc(
+_d3d11_create_texture :: proc(
+	s: ^D3D11_State,
 	width: int,
 	height: int,
 	format: Pixel_Format,
 	data: rawptr,
 ) -> (
-	Texture_Handle,
+	Render_Backend_Texture,
 	bool,
 ) {
 	texture_desc := d3d11.TEXTURE2D_DESC{
@@ -570,6 +627,7 @@ create_texture :: proc(
 	}
 
 	texture: ^d3d11.ITexture2D
+	err: d3d11.HRESULT
 
 	if data != nil {
 		texture_data := d3d11.SUBRESOURCE_DATA{
@@ -577,18 +635,24 @@ create_texture :: proc(
 			SysMemPitch = u32(width * pixel_format_size(format)),
 		}
 
-		if ch(s.device->CreateTexture2D(&texture_desc, &texture_data, &texture)) < 0 {
+		err = s.device->CreateTexture2D(&texture_desc, &texture_data, &texture)
+
+		if !d3d11_check(s, err) {
 			return {}, false
 		}
 	} else {
-		if ch(s.device->CreateTexture2D(&texture_desc, nil, &texture)) < 0 {
+		err = s.device->CreateTexture2D(&texture_desc, nil, &texture)
+
+		if !d3d11_check(s, err) {
 			return {}, false
 		}
 	}
 
 	texture_view: ^d3d11.IShaderResourceView
 
-	if ch(s.device->CreateShaderResourceView(texture, nil, &texture_view)) < 0 {
+	err = s.device->CreateShaderResourceView(texture, nil, &texture_view)
+
+	if !d3d11_check(s, err) {
 		texture->Release()
 		return {}, false
 	}
@@ -597,7 +661,6 @@ create_texture :: proc(
 		tex = texture,
 		format = format,
 		view = texture_view,
-		sampler = create_sampler(.MIN_MAG_MIP_POINT),
 	}
 
 	tex_handle, tex_add_err := hm.add(&s.textures, tex)
@@ -606,24 +669,30 @@ create_texture :: proc(
 		log.errorf("Failed to add texture. Error: %v", tex_add_err)
 		texture_view->Release()
 		texture->Release()
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	return tex_handle, true
 }
 
 d3d11_create_texture :: proc(
+	s: ^D3D11_State,
 	width: int,
 	height: int,
 	format: Pixel_Format,
-) -> (Texture_Handle, bool) {
-	return create_texture(width, height, format, nil)
+) -> (Render_Backend_Texture, bool) {
+	return _d3d11_create_texture(s, width, height, format, nil)
 }
 
 d3d11_create_render_texture :: proc(
+	s: ^D3D11_State,
 	width: int,
 	height: int,
-) -> (Texture_Handle, Render_Target_Handle, bool) {
+) -> (
+	_rt_texture: Render_Backend_Texture,
+	_rt: Render_Target_Handle,
+	_ok: bool,
+) {
 	texture_desc := d3d11.TEXTURE2D_DESC{
 		Width      = u32(width),
 		Height     = u32(height),
@@ -637,15 +706,19 @@ d3d11_create_render_texture :: proc(
 
 	texture: ^d3d11.ITexture2D
 
-	if ch(s.device->CreateTexture2D(&texture_desc, nil, &texture)) < 0 {
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+	err := s.device->CreateTexture2D(&texture_desc, nil, &texture)
+
+	if !d3d11_check(s, err) {
+		return
 	}
 
 	texture_view: ^d3d11.IShaderResourceView
 
-	if ch(s.device->CreateShaderResourceView(texture, nil, &texture_view)) < 0 {
+	err = s.device->CreateShaderResourceView(texture, nil, &texture_view)
+
+	if !d3d11_check(s, err) {
 		texture->Release()
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return
 	}
 
 	render_target_view_desc := d3d11.RENDER_TARGET_VIEW_DESC {
@@ -655,19 +728,20 @@ d3d11_create_render_texture :: proc(
 
 	render_target_view: ^d3d11.IRenderTargetView
 
-	if ch(s.device->CreateRenderTargetView(
+	err = s.device->CreateRenderTargetView(
 		texture, &render_target_view_desc, &render_target_view,
-	)) < 0 {
+	)
+
+	if !d3d11_check(s, err) {
 		texture_view->Release()
 		texture->Release()
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return
 	}
 
 	d3d11_texture := D3D11_Texture {
 		tex = texture,
 		view = texture_view,
 		format = .RGBA_32_Float,
-		sampler = create_sampler(.MIN_MAG_MIP_POINT),
 	}
 
 	d3d11_render_target := D3D11_Render_Target {
@@ -688,23 +762,31 @@ d3d11_create_render_texture :: proc(
 			BindFlags  = {.DEPTH_STENCIL},
 		}
 
-		if ch(s.device->CreateTexture2D(&depth_buffer_desc, nil, &d3d11_render_target.depth_buffer)) < 0 {
+		err = s.device->CreateTexture2D(
+			&depth_buffer_desc,
+			nil,
+			&d3d11_render_target.depth_buffer,
+		)
+
+		if !d3d11_check(s, err) {
 			render_target_view->Release()
 			texture_view->Release()
 			texture->Release()
-			return TEXTURE_NONE, RENDER_TARGET_NONE, false
+			return
 		}
 
-		if ch(s.device->CreateDepthStencilView(
+		err = s.device->CreateDepthStencilView(
 			d3d11_render_target.depth_buffer,
 			nil,
 			&d3d11_render_target.depth_buffer_view,
-		)) < 0 {
+		)
+
+		if !d3d11_check(s, err) {
 			d3d11_render_target.depth_buffer->Release()
 			render_target_view->Release()
 			texture_view->Release()
 			texture->Release()
-			return TEXTURE_NONE, RENDER_TARGET_NONE, false
+			return
 		}
 	}
 
@@ -721,7 +803,7 @@ d3d11_create_render_texture :: proc(
 		render_target_view->Release()
 		texture_view->Release()
 		texture->Release()
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return
 	}
 
 	rt_handle, rt_add_err := hm.add(&s.render_targets, d3d11_render_target)
@@ -737,13 +819,13 @@ d3d11_create_render_texture :: proc(
 		render_target_view->Release()
 		texture_view->Release()
 		texture->Release()
-		return TEXTURE_NONE, RENDER_TARGET_NONE, false
+		return
 	}
 
 	return tex_handle, rt_handle, true
 }
 
-d3d11_destroy_render_target :: proc(render_target: Render_Target_Handle) {
+d3d11_destroy_render_target :: proc(s: ^D3D11_State, render_target: Render_Target_Handle) {
 	if rt := hm.get(&s.render_targets, render_target); rt != nil {
 		rt.render_target_view->Release()
 
@@ -757,27 +839,29 @@ d3d11_destroy_render_target :: proc(render_target: Render_Target_Handle) {
 }
 
 d3d11_load_texture :: proc(
+	s: ^D3D11_State,
 	data: []u8,
 	width: int,
 	height: int,
 	format: Pixel_Format,
-) -> (Texture_Handle, bool) {
-	return create_texture(width, height, format, raw_data(data))
+) -> (Render_Backend_Texture, bool) {
+	return _d3d11_create_texture(s, width, height, format, raw_data(data))
 }
 
 d3d11_load_texture_compressed :: proc(
+	s: ^D3D11_State,
 	data: []u8,
 	width: int,
 	height: int,
 	format: Compressed_Texture_Format,
-) -> (Texture_Handle, bool) {
+) -> (Render_Backend_Texture, bool) {
 	dxgi_format: dxgi.FORMAT
 	#partial switch format {
 	case .BC3_RGBA: dxgi_format = .BC3_UNORM
 	case .BC7_RGBA: dxgi_format = .BC7_UNORM
 	case:
 		log.errorf("Compressed texture format %v is unsupported by the D3D11 backend", format)
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	desc := d3d11.TEXTURE2D_DESC{
@@ -796,31 +880,36 @@ d3d11_load_texture_compressed :: proc(
 		SysMemSlicePitch = u32(len(data)),
 	}
 	texture: ^d3d11.ITexture2D
-	if ch(s.device->CreateTexture2D(&desc, &initial_data, &texture)) < 0 {
-		return TEXTURE_NONE, false
+	if !d3d11_check(s, s.device->CreateTexture2D(&desc, &initial_data, &texture)) {
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 	view: ^d3d11.IShaderResourceView
-	if ch(s.device->CreateShaderResourceView(texture, nil, &view)) < 0 {
+	if !d3d11_check(s, s.device->CreateShaderResourceView(texture, nil, &view)) {
 		texture->Release()
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 
 	texture_handle, err := hm.add(&s.textures, D3D11_Texture{
 		tex = texture,
 		view = view,
 		format = .Unknown,
-		sampler = create_sampler(.MIN_MAG_MIP_POINT),
 	})
 	if err != nil {
 		view->Release()
 		texture->Release()
 		log.errorf("Failed to add compressed texture. Error: %v", err)
-		return TEXTURE_NONE, false
+		return RENDER_BACKEND_TEXTURE_NONE, false
 	}
 	return texture_handle, true
 }
 
-d3d11_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect, pitch: int) -> bool {
+d3d11_update_texture :: proc(
+	s: ^D3D11_State,
+	th: Render_Backend_Texture,
+	data: []u8,
+	rect: Rect,
+	pitch: int,
+) -> bool {
 	tex := hm.get(&s.textures, th)
 
 	if tex == nil || tex.tex == nil || tex.format == .Unknown {
@@ -847,83 +936,77 @@ d3d11_update_texture :: proc(th: Texture_Handle, data: []u8, rect: Rect, pitch: 
 	return true
 }
 
-d3d11_destroy_texture :: proc(th: Texture_Handle) {
+d3d11_destroy_texture :: proc(s: ^D3D11_State, th: Render_Backend_Texture) {
 	if t := hm.get(&s.textures, th); t != nil {
 		t.tex->Release()
-		t.view->Release()	
-
-		if t.sampler != nil {
-			t.sampler->Release()
-		}
+		t.view->Release()
 	}
 
 	hm.remove(&s.textures, th)
 }
 
-d3d11_texture_needs_vertical_flip :: proc(th: Texture_Handle) -> bool {
-	return false
-}
-
-d3d11_set_texture_filter :: proc(
-	th: Texture_Handle,
-	scale_down_filter: Texture_Filter,
-	scale_up_filter: Texture_Filter,
-	mip_filter: Texture_Filter,
-) {
-	t := hm.get(&s.textures, th)
-
-	if t == nil {
-		log.error("Trying to set texture filter for invalid texture %v", th)
-		return
+d3d11_get_texture_sampler :: proc(s: ^D3D11_State, sampler: Texture_Sampler) -> ^d3d11.ISamplerState {
+	if smp, has_smp := s.texture_samplers[sampler]; has_smp {
+		return smp
 	}
 
-	d := scale_down_filter
-	u := scale_up_filter
-	m := mip_filter
+	d := sampler.scale_down_filter
+	u := sampler.scale_up_filter
 	f: d3d11.FILTER
 
-	if d == .Point && u == .Point && m == .Point {
+	if d == .Point && u == .Point {
 		f = .MIN_MAG_MIP_POINT
-	} else if d == .Linear && u == .Linear && m == .Linear {
-		f = .MIN_MAG_MIP_LINEAR
-	} else if d == .Point && u == .Point && m == .Linear {
-		f = .MIN_MAG_POINT_MIP_LINEAR
-	} else if d == .Point && u == .Linear && m == .Linear {
-		f = .MIN_POINT_MAG_MIP_LINEAR
-	} else if d == .Linear && u == .Linear && m == .Linear {
-		f = .MIN_MAG_MIP_LINEAR
-	} else if d == .Linear && u == .Linear && m == .Point {
+	} else if d == .Linear && u == .Linear {
 		f = .MIN_MAG_LINEAR_MIP_POINT
-	} else if d == .Linear && u == .Point && m == .Point {
+	} else if d == .Linear && u == .Point {
 		f = .MIN_LINEAR_MAG_MIP_POINT
-	} else if d == .Linear && u == .Point && m == .Linear {
-		f = .MIN_LINEAR_MAG_POINT_MIP_LINEAR
-	} else if d == .Point && u == .Linear && m == .Point {
+	} else if d == .Point && u == .Linear {
 		f = .MIN_POINT_MAG_LINEAR_MIP_POINT
 	}
 
-	if t.sampler != nil {
-		t.sampler->Release()
+	d3d11_translate_texture_wrap :: proc(wrap: Texture_Wrap) -> d3d11.TEXTURE_ADDRESS_MODE {
+		switch wrap {
+		case .Clamp: return .CLAMP
+		case .Repeat: return .WRAP
+		case .Mirrored_Repeat: return .MIRROR
+		case .Border: return .BORDER
+		}
+
+		return .CLAMP
 	}
 
-	t.sampler = create_sampler(f)
-}
+	wrap_color: [4]f32
+	switch sampler.wrap_border_color {
+	case .Transparent_Black: wrap_color = { 0, 0, 0, 0 }
+	case .Black: wrap_color = { 0, 0, 0, 1 }
+	case .White: wrap_color = { 1, 1, 1, 1 }
+	}
 
-create_sampler :: proc(filter: d3d11.FILTER) -> ^d3d11.ISamplerState {
-	sampler_desc := d3d11.SAMPLER_DESC{
-		Filter = filter,
-		AddressU = .CLAMP,
-		AddressV = .CLAMP,
+	sampler_desc := d3d11.SAMPLER_DESC {
+		Filter = f,
+		AddressU = d3d11_translate_texture_wrap(sampler.wrap_x),
+		AddressV = d3d11_translate_texture_wrap(sampler.wrap_y),
 		AddressW = .CLAMP,
 		ComparisonFunc = .NEVER,
+		BorderColor = wrap_color,
 	}
 
 	smp: ^d3d11.ISamplerState
-	ch(s.device->CreateSamplerState(&sampler_desc, &smp))
+	err := s.device->CreateSamplerState(&sampler_desc, &smp)
+
+	// We store nil for a failed sampler so that it isn't re-created on each try. That would spam
+	// the log etc.
+	if !d3d11_check(s, err) {
+		s.texture_samplers[sampler] = nil
+		return nil
+	}
+
+	s.texture_samplers[sampler] = smp
 	return smp
 }
 
 d3d11_load_shader :: proc(
+	s: ^D3D11_State,
 	vs_source: []byte,
 	ps_source: []byte,
 	desc_allocator := frame_allocator,
@@ -940,7 +1023,7 @@ d3d11_load_shader :: proc(
 
 	vs_blob: ^d3d11.IBlob
 	vs_blob_errors: ^d3d11.IBlob
-	vs_compile_res := ch(d3d_compiler.Compile(
+	err := d3d_compiler.Compile(
 		raw_data(vs_source),
 		len(vs_source),
 		nil,
@@ -952,7 +1035,9 @@ d3d11_load_shader :: proc(
 		0,
 		&vs_blob,
 		&vs_blob_errors,
-	))
+	)
+
+	d3d11_check(s, err)
 
 	if vs_blob_errors != nil {
 		log.error("Failed compiling shader:")
@@ -962,7 +1047,7 @@ d3d11_load_shader :: proc(
 
 	// The compiler can fail without producing an error blob, for example when it cannot even start
 	// on the source. There is no bytecode in that case, so there is nothing to make a shader from.
-	if vs_compile_res < 0 || vs_blob == nil {
+	if err < 0 || vs_blob == nil {
 		log.error("Failed compiling vertex shader.")
 		return
 	}
@@ -971,31 +1056,36 @@ d3d11_load_shader :: proc(
 
 	vertex_shader: ^d3d11.IVertexShader
 
-	if ch(s.device->CreateVertexShader(
+	err = s.device->CreateVertexShader(
 		vs_blob->GetBufferPointer(),
 		vs_blob->GetBufferSize(),
 		nil,
 		&vertex_shader,
-	)) < 0 {
+	)
+
+	if !d3d11_check(s, err) {
 		vs_blob->Release()
 		return
 	}
 
 	vs_ref: ^d3d11.IShaderReflection
 
-	if ch(d3d_compiler.Reflect(
+	err = d3d_compiler.Reflect(
 		vs_blob->GetBufferPointer(),
 		vs_blob->GetBufferSize(),
 		d3d11.ID3D11ShaderReflection_UUID,
 		(^rawptr)(&vs_ref),
-	)) < 0 {
+	)
+
+	if !d3d11_check(s, err) {
 		vertex_shader->Release()
 		vs_blob->Release()
 		return
 	}
 
 	vs_desc: d3d11.SHADER_DESC
-	ch(vs_ref->GetDesc(&vs_desc))
+	err = vs_ref->GetDesc(&vs_desc)
+	d3d11_check(s, err)
 
 	{
 		desc.inputs = make([]Shader_Input, vs_desc.InputParameters, desc_allocator)
@@ -1004,7 +1094,9 @@ d3d11_load_shader :: proc(
 		for in_idx in 0..<vs_desc.InputParameters {
 			in_desc: d3d11.SIGNATURE_PARAMETER_DESC
 			
-			if ch(vs_ref->GetInputParameterDesc(in_idx, &in_desc)) < 0 {
+			err = vs_ref->GetInputParameterDesc(in_idx, &in_desc)
+
+			if !d3d11_check(s, err) {
 				log.errorf("Invalid shader input: %v", in_idx)
 				continue
 			}
@@ -1047,7 +1139,8 @@ d3d11_load_shader :: proc(
 	d3d_constant_buffers := make([dynamic]D3D11_Shader_Constant_Buffer, s.allocator)
 	d3d_texture_bindings := make([dynamic]D3D11_Texture_Binding, s.allocator)
 	texture_bindpoint_descs := make([dynamic]Shader_Texture_Bindpoint_Desc, desc_allocator)
-	vs_constants_ok := reflect_shader_constants(
+	vs_constants_ok := d3d11_reflect_shader_constants(
+		s,
 		vs_desc,
 		vs_ref,
 		&constant_descs,
@@ -1063,7 +1156,7 @@ d3d11_load_shader :: proc(
 	vs_ref->Release()
 
 	if !vs_constants_ok {
-		release_constant_buffers(d3d_constant_buffers[:])
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		vertex_shader->Release()
 		vs_blob->Release()
 		return
@@ -1083,14 +1176,16 @@ d3d11_load_shader :: proc(
 
 	input_layout: ^d3d11.IInputLayout
 
-	if ch(s.device->CreateInputLayout(
+	err = s.device->CreateInputLayout(
 		raw_data(input_layout_desc),
 		u32(len(input_layout_desc)),
 		vs_blob->GetBufferPointer(),
 		vs_blob->GetBufferSize(),
 		&input_layout,
-	)) < 0 {
-		release_constant_buffers(d3d_constant_buffers[:])
+	)
+
+	if !d3d11_check(s, err) {
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		vertex_shader->Release()
 		vs_blob->Release()
 		return
@@ -1103,7 +1198,7 @@ d3d11_load_shader :: proc(
 
 	ps_blob: ^d3d11.IBlob
 	ps_blob_errors: ^d3d11.IBlob
-	ps_compile_res := ch(d3d_compiler.Compile(
+	err = d3d_compiler.Compile(
 		raw_data(ps_source),
 		len(ps_source),
 		nil,
@@ -1115,20 +1210,22 @@ d3d11_load_shader :: proc(
 		0,
 		&ps_blob,
 		&ps_blob_errors,
-	))
+	)
+
+	d3d11_check(s, err)
 
 	if ps_blob_errors != nil {
 		log.error("Failed compiling shader:")
 		log.error(strings.string_from_ptr((^u8)(ps_blob_errors->GetBufferPointer()), int(ps_blob_errors->GetBufferSize())))
-		release_constant_buffers(d3d_constant_buffers[:])
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		input_layout->Release()
 		vertex_shader->Release()
 		return
 	}
 
-	if ps_compile_res < 0 || ps_blob == nil {
+	if err < 0 || ps_blob == nil {
 		log.error("Failed compiling pixel shader.")
-		release_constant_buffers(d3d_constant_buffers[:])
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		input_layout->Release()
 		vertex_shader->Release()
 		return
@@ -1136,13 +1233,15 @@ d3d11_load_shader :: proc(
 
 	pixel_shader: ^d3d11.IPixelShader
 
-	if ch(s.device->CreatePixelShader(
+	err = s.device->CreatePixelShader(
 		ps_blob->GetBufferPointer(),
 		ps_blob->GetBufferSize(),
 		nil,
 		&pixel_shader,
-	)) < 0 {
-		release_constant_buffers(d3d_constant_buffers[:])
+	)
+
+	if !d3d11_check(s, err) {
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		ps_blob->Release()
 		input_layout->Release()
 		vertex_shader->Release()
@@ -1151,13 +1250,15 @@ d3d11_load_shader :: proc(
 
 	ps_ref: ^d3d11.IShaderReflection
 
-	if ch(d3d_compiler.Reflect(
+	err = d3d_compiler.Reflect(
 		ps_blob->GetBufferPointer(),
 		ps_blob->GetBufferSize(),
 		d3d11.ID3D11ShaderReflection_UUID,
 		(^rawptr)(&ps_ref),
-	)) < 0 {
-		release_constant_buffers(d3d_constant_buffers[:])
+	)
+
+	if !d3d11_check(s, err) {
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		pixel_shader->Release()
 		ps_blob->Release()
 		input_layout->Release()
@@ -1168,9 +1269,11 @@ d3d11_load_shader :: proc(
 	ps_blob->Release()
 
 	ps_desc: d3d11.SHADER_DESC
-	ch(ps_ref->GetDesc(&ps_desc))
+	err = ps_ref->GetDesc(&ps_desc)
+	d3d11_check(s, err)
 
-	ps_constants_ok := reflect_shader_constants(
+	ps_constants_ok := d3d11_reflect_shader_constants(
+		s,
 		ps_desc,
 		ps_ref,
 		&constant_descs,
@@ -1185,7 +1288,7 @@ d3d11_load_shader :: proc(
 	ps_ref->Release()
 
 	if !ps_constants_ok {
-		release_constant_buffers(d3d_constant_buffers[:])
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		pixel_shader->Release()
 		input_layout->Release()
 		vertex_shader->Release()
@@ -1210,7 +1313,7 @@ d3d11_load_shader :: proc(
 
 	if h_add_err != nil {
 		log.errorf("Failed to add shader. Error: %v", h_add_err)
-		release_constant_buffers(d3d_constant_buffers[:])
+		d3d11_release_constant_buffers(d3d_constant_buffers[:])
 		input_layout->Release()
 		vertex_shader->Release()
 		pixel_shader->Release()
@@ -1227,7 +1330,7 @@ D3D11_Shader_Type :: enum {
 
 // Shader loading creates constant buffers as it reflects over the vertex shader, so anything that
 // gives up after that point has to hand them back.
-release_constant_buffers :: proc(constant_buffers: []D3D11_Shader_Constant_Buffer) {
+d3d11_release_constant_buffers :: proc(constant_buffers: []D3D11_Shader_Constant_Buffer) {
 	for c in constant_buffers {
 		if c.gpu_data != nil {
 			c.gpu_data->Release()
@@ -1235,7 +1338,8 @@ release_constant_buffers :: proc(constant_buffers: []D3D11_Shader_Constant_Buffe
 	}
 }
 
-reflect_shader_constants :: proc(
+d3d11_reflect_shader_constants :: proc(
+	s: ^D3D11_State,
 	d3d_desc: d3d11.SHADER_DESC,
 	ref: ^d3d11.IShaderReflection,
 	constant_descs: ^[dynamic]Shader_Constant_Desc,
@@ -1304,7 +1408,9 @@ reflect_shader_constants :: proc(
 
 				// Without this buffer the shader never receives its constants, not even the
 				// view-projection matrix, so it would draw in the wrong place rather than fail.
-				if ch(s.device->CreateBuffer(&constant_buffer_desc, nil, &buf.gpu_data)) < 0 {
+				err := s.device->CreateBuffer(&constant_buffer_desc, nil, &buf.gpu_data)
+
+				if !d3d11_check(s, err) {
 					log.errorf("Failed creating constant buffer '%v'.", bind_desc.Name)
 					return false
 				}
@@ -1328,9 +1434,16 @@ reflect_shader_constants :: proc(
 				var_info->GetDesc(&var_desc)
 
 				if var_desc.Name != "" {
+					default_value: []u8
+
+					if var_desc.DefaultValue != nil {
+						default_value = slice.clone(slice.bytes_from_ptr(var_desc.DefaultValue, int(var_desc.Size)), desc_allocator)
+					}
+
 					append(constant_descs, Shader_Constant_Desc {
 						name = strings.clone_from_cstring(var_desc.Name, desc_allocator),
 						size = int(var_desc.Size),
+						default_value = default_value,
 					})
 
 					append(d3d_constants, D3D11_Shader_Constant {
@@ -1344,11 +1457,8 @@ reflect_shader_constants :: proc(
 		}
 	}
 
-	// Make sure each texture has a sampler. In GL samplers are associated with textures. In D3D11
-	// several textures can use a single sampler. We don't want this as we want to be able to
-	// configure filters etc on a per-texture level. Since two textures can arrive at a draw call
-	// with different filters set, if they use the same sampler, then it will be impossible to set
-	// that filtering up.
+	// The way Karl2D is built, we need one sampler per texture. In GL this is how it always works,
+	// for D3D we use this loop to ensure it.
 	for &t, t_idx in d3d_texture_bindings {
 		found := false
 
@@ -1374,7 +1484,7 @@ reflect_shader_constants :: proc(
 	return true
 }
 
-d3d11_destroy_shader :: proc(h: Shader_Handle) {
+d3d11_destroy_shader :: proc(s: ^D3D11_State, h: Shader_Handle) {
 	shd := hm.get(&s.shaders, h)
 
 	if shd == nil {
@@ -1399,8 +1509,6 @@ d3d11_destroy_shader :: proc(h: Shader_Handle) {
 }
 
 // API END
-
-s: ^D3D11_State
 
 D3D11_Shader_Constant_Buffer :: struct {
 	gpu_data: ^d3d11.IBuffer,
@@ -1430,6 +1538,7 @@ D3D11_Shader :: struct {
 }
 
 D3D11_State :: struct {
+	using _: Render_Backend_State,
 	allocator: runtime.Allocator,
 
 	window_handle: dxgi.HWND,
@@ -1447,15 +1556,16 @@ D3D11_State :: struct {
 	blend_state_premultiplied_alpha: ^d3d11.IBlendState,
 	blend_state_additive: ^d3d11.IBlendState,
 	anti_alias: bool,
+	vsync: bool,
 
-	textures: hm.Dynamic_Handle_Map(D3D11_Texture, Texture_Handle),
+	textures: hm.Dynamic_Handle_Map(D3D11_Texture, Render_Backend_Texture),
 	render_targets: hm.Dynamic_Handle_Map(D3D11_Render_Target, Render_Target_Handle),
 	shaders: hm.Dynamic_Handle_Map(D3D11_Shader, Shader_Handle),
 
 	info_queue: ^d3d11.IInfoQueue,
 	vertex_buffer_gpu: ^d3d11.IBuffer,
 
-	all_samplers: map[^d3d11.ISamplerState]struct{},
+	texture_samplers: map[Texture_Sampler]^d3d11.ISamplerState,
 
 	// The depth things below are only created when `depth_test` is true.
 	depth_test: bool,
@@ -1464,7 +1574,7 @@ D3D11_State :: struct {
 	depth_stencil_state: ^d3d11.IDepthStencilState,
 }
 
-create_swapchain :: proc(w, h: int) {
+d3d11_create_swapchain :: proc(s: ^D3D11_State, w, h: int) {
 	sample_count: u32 = 1
 	num_sample_quality_levels: u32
 
@@ -1493,10 +1603,22 @@ create_swapchain :: proc(w, h: int) {
 	}
 
 	dxgi_factory: ^dxgi.IFactory2
-	ch(s.dxgi_adapter->GetParent(dxgi.IFactory2_UUID, (^rawptr)(&dxgi_factory)))
-	ch(dxgi_factory->CreateSwapChainForHwnd(s.device, s.window_handle, &swapchain_desc, nil, nil, &s.swapchain))
-	ch(s.swapchain->GetBuffer(0, d3d11.ITexture2D_UUID, (^rawptr)(&s.framebuffer)))
-	ch(s.device->CreateRenderTargetView(s.framebuffer, nil, &s.framebuffer_view))
+	err := s.dxgi_adapter->GetParent(dxgi.IFactory2_UUID, (^rawptr)(&dxgi_factory))
+	d3d11_check(s, err)
+	err = dxgi_factory->CreateSwapChainForHwnd(
+		s.device,
+		s.window_handle,
+		&swapchain_desc,
+		nil,
+		nil,
+		&s.swapchain,
+	)
+
+	d3d11_check(s, err)
+	err = s.swapchain->GetBuffer(0, d3d11.ITexture2D_UUID, (^rawptr)(&s.framebuffer))
+	d3d11_check(s, err)
+	err = s.device->CreateRenderTargetView(s.framebuffer, nil, &s.framebuffer_view)
+	d3d11_check(s, err)
 	dxgi_factory->MakeWindowAssociation(s.window_handle, { .NO_ALT_ENTER })
 
 	if s.depth_test {
@@ -1511,25 +1633,18 @@ create_swapchain :: proc(w, h: int) {
 			BindFlags  = {.DEPTH_STENCIL},
 		}
 
-		ch(s.device->CreateTexture2D(&depth_buffer_desc, nil, &s.depth_buffer))
-		ch(s.device->CreateDepthStencilView(s.depth_buffer, nil, &s.depth_buffer_view))
+		err = s.device->CreateTexture2D(&depth_buffer_desc, nil, &s.depth_buffer)
+		d3d11_check(s, err)
+		err = s.device->CreateDepthStencilView(s.depth_buffer, nil, &s.depth_buffer_view)
+		d3d11_check(s, err)
 	}
 }
 
 D3D11_Texture :: struct {
-	handle: Texture_Handle,
+	handle: Render_Backend_Texture,
 	tex: ^d3d11.ITexture2D,
 	view: ^d3d11.IShaderResourceView,
 	format: Pixel_Format,
-
-	// It may seem strange that we have a sampler here. But samplers are reused if you recreate them
-	// with the same options. D3D11 will return the same object. So each time we set the filter
-	// mode or the UV wrapping settings, then we just ask D3D11 for the sampler state for those
-	// settings.
-	//
-	// Moreover, in order to make D3D11 behave a bit like GL (or rather, to make them behave more
-	// similarly), we require that each texture in the HLSL shaders have a dedicated sampler.
-	sampler: ^d3d11.ISamplerState,
 }
 
 D3D11_Render_Target :: struct {
@@ -1562,17 +1677,17 @@ dxgi_format_from_pixel_format :: proc(f: Pixel_Format) -> dxgi.FORMAT {
 }
 
 // CHeck win errors and print message log if there is any error
-ch :: proc(hr: dxgi.HRESULT, loc := #caller_location) -> dxgi.HRESULT {
+d3d11_check :: proc(s: ^D3D11_State, hr: dxgi.HRESULT, loc := #caller_location) -> bool {
 	if hr >= 0 {
-		return hr
+		return true
 	}
 
 	log.errorf("d3d11 error: 0x%0x", u32(hr), location = loc)
-	log_messages(loc)
-	return hr
+	d3d11_log_messages(s, loc)
+	return false
 }
 
-log_messages :: proc(loc := #caller_location) {
+d3d11_log_messages :: proc(s: ^D3D11_State, loc := #caller_location) {
 	iq := s.info_queue
 	
 	if iq == nil {
@@ -1609,15 +1724,15 @@ log_messages :: proc(loc := #caller_location) {
 	iq->ClearStoredMessages()
 }
 
-DEFAULT_SHADER_SOURCE :: #load("default_shaders/default_shader_d3d11.hlsl")
+D3D11_DEFAULT_SHADER_SOURCE :: #load("default_shaders/default_shader_d3d11.hlsl")
 
 d3d11_default_shader_vertex_source :: proc() -> []byte {
-	s := DEFAULT_SHADER_SOURCE
+	s := D3D11_DEFAULT_SHADER_SOURCE
 	return s
 }
 
 d3d11_default_shader_fragment_source :: proc() -> []byte {
-	s := DEFAULT_SHADER_SOURCE
+	s := D3D11_DEFAULT_SHADER_SOURCE
 	return s
 }
 

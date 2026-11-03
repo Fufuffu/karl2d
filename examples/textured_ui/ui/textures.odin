@@ -60,7 +60,7 @@ draw_skin :: proc(ui_context: ^UI_Context, rect: Rect, skin: Skin, tint := k2.WH
 	k2.set_shader_constant(shader, shader.constant_lookup["source_rect"], [4]f32{source.x, source.y, source.w, source.h})
 	k2.set_shader_constant(shader, shader.constant_lookup["source_borders"], skin.borders)
 	k2.set_shader_constant(shader, shader.constant_lookup["dest_size_scale"], [4]f32{rect.w, rect.h, scale, 0})
-	k2.set_shader_constant(shader, shader.constant_lookup["atlas_size"], [2]f32{f32(skin.texture.width), f32(skin.texture.height)})
+	k2.set_shader_constant(shader, shader.constant_lookup["atlas_size"], k2.get_texture_size(skin.texture))
 	k2.set_shader(shader)
 	k2.draw_texture_fit(skin.texture, k2.get_texture_rect(skin.texture), rect, tint = tint)
 	k2.set_shader(nil)
@@ -72,7 +72,7 @@ image_region :: proc(ui_context: ^UI_Context, rect: Rect, texture: k2.Texture, s
 }
 
 bar_style_enabled :: proc(style: Bar_Style) -> bool {
-	return style.track.texture.handle != k2.TEXTURE_NONE || style.fill.texture.handle != k2.TEXTURE_NONE || style.thumb.texture.handle != k2.TEXTURE_NONE
+	return style.track.texture != k2.TEXTURE_NONE || style.fill.texture != k2.TEXTURE_NONE || style.thumb.texture != k2.TEXTURE_NONE
 }
 
 bar_style_height :: proc(style: Bar_Style) -> f32 {
