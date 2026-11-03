@@ -11,7 +11,7 @@ import "core:sync"
 import "core:thread"
 
 WAVEOUT_BUFFER_SAMPLES :: 441
-WAVEOUT_BUFFER_COUNT :: 6
+WAVEOUT_BUFFER_COUNT :: 10
 
 AUDIO_BACKEND_WAVEOUT :: Audio_Backend_Interface {
 	state_type = Waveout_State,

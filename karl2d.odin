@@ -4948,12 +4948,12 @@ update_audio :: proc() {
 		master_bus_chunk := s.master_bus.chunk[:]
 
 		for _ in 0..<MAX_CHUNKS_PER_UPDATE {
-			// If the sample rate of the backend is 44100 samples/second and s.ab.mix_chunk_size is
-			// 1400 samples, then this procedure will only run roughly 44100/1400 = 31 times per
-			// second. This gives a latency of up to (1.5 * (44100/1400)) = 47 milliseconds.
+			// Refills only happen once per frame, so the queue must outlast frame hitches. With a
+			// 1400 sample chunk at 44100 samples/second, 3 chunks is 95 ms and the latency is up
+			// to 4 chunks, 127 ms.
 			//
 			// Note that s.ab.mix_chunk_size varies from audio backend to audio backend.
-			if s.ab.pushed_samples_remaining(s.ab_state) > (3 * s.ab.mix_chunk_size)/2 {
+			if s.ab.pushed_samples_remaining(s.ab_state) > 3 * s.ab.mix_chunk_size {
 				break
 			}
 
